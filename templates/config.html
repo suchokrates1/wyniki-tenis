@@ -12,6 +12,7 @@
 </head>
 <body class="bg-gray-900 text-white min-h-screen">
   <main class="max-w-6xl mx-auto py-10 px-4 space-y-10">
+    {% set corner_keys = corners if corners else ['top_left', 'top_right', 'bottom_left', 'bottom_right'] %}
     <form id="config-form" method="post" class="bg-gray-800/80 backdrop-blur rounded-2xl shadow-xl border border-gray-700/60 w-full p-8 space-y-8">
       <header class="space-y-2">
         <h1 class="text-3xl font-semibold flex items-center gap-3">⚙️ Konfiguracja wycinków</h1>
@@ -52,8 +53,8 @@
         <h2 class="text-xl font-semibold flex items-center gap-2">🎯 Ustawienia narożników</h2>
         <p class="text-sm text-gray-300">Każdy narożnik może mieć własny rozmiar wycinka, skalę, offset oraz ustawienia etykiety.</p>
         <div class="space-y-6">
-          {% for corner in corners %}
-            {% set corner_config = config.kort_all[corner] %}
+          {% for corner in corner_keys %}
+            {% set corner_config = config.kort_all.get(corner, {}) %}
             <fieldset class="border border-gray-700/60 rounded-xl p-6 bg-gray-900/40 space-y-4">
               <legend class="px-2 text-lg font-semibold text-emerald-300 uppercase tracking-wider">{{ corner_labels[corner] }}</legend>
               <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
@@ -118,9 +119,9 @@
       <p class="text-sm text-gray-300">Podgląd reprezentuje scenę o rozdzielczości 1920×1080. Zmiany w formularzu natychmiast aktualizują rozmiary i pozycje placeholderów.</p>
       <div id="preview-wrapper" class="overflow-hidden relative w-full rounded-xl border border-gray-700/80 bg-gray-900/80 p-4">
         <div id="preview-stage" class="relative" style="width: 1920px; height: 1080px;">
-          {% for corner in corners %}
-            {% set corner_config = config.kort_all[corner] %}
-            <div class="preview-card absolute border border-emerald-400/40 rounded-xl bg-emerald-500/10 text-emerald-100/90 overflow-hidden" data-corner="{{ corner }}" style="{{ corner_positions[corner].style }} width: {{ corner_config.view_width * corner_config.display_scale }}px; height: {{ corner_config.view_height * corner_config.display_scale }}px;">
+          {% for corner in corner_keys %}
+            {% set corner_config = config.kort_all.get(corner, {}) %}
+            <div class="preview-card absolute border border-emerald-400/40 rounded-xl bg-emerald-500/10 text-emerald-100/90 overflow-hidden" data-corner="{{ corner }}" style="{{ corner_positions[corner].style }} width: {{ (corner_config.view_width | default(0)) * (corner_config.display_scale | default(0)) }}px; height: {{ (corner_config.view_height | default(0)) * (corner_config.display_scale | default(0)) }}px;">
               <div class="preview-overlay absolute inset-0 bg-gradient-to-br from-emerald-400/10 to-transparent pointer-events-none"></div>
               <div class="preview-frame absolute bg-gray-500/30 border border-emerald-300/40 rounded-lg" data-preview-frame></div>
               <span class="preview-label absolute text-[10px] font-semibold uppercase tracking-widest bg-black/70 px-2 py-1 rounded" data-preview-label>{{ corner_labels[corner] }}</span>
@@ -140,7 +141,7 @@
         return;
       }
 
-      const corners = {{ corners|default([])|tojson }};
+      const corners = {{ corner_keys|tojson }};
       const defaults = {{ config.kort_all|default({})|tojson }};
       const cornerLabels = {{ corner_labels|default({})|tojson }};
 
