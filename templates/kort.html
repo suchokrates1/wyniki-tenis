@@ -55,8 +55,8 @@
   <div class="top-strip">
     {% for i, url in mini_overlays %}
       <div class="mini-overlay"
-           style="width: {{ config.view_width * config.display_scale }}px;
-                  height: {{ config.view_height * config.display_scale }}px;
+           style="width: {{ mini_config.view_width * mini_config.display_scale }}px;
+                  height: {{ mini_config.view_height * mini_config.display_scale }}px;
                   position: relative;
                   overflow: hidden;
                   border-radius: 8px;
@@ -69,32 +69,18 @@
           style="
             width: 1920px;
             height: 1080px;
-            transform: scale({{ config.display_scale }});
+            transform: scale({{ mini_config.display_scale }});
             transform-origin: bottom left;
             position: absolute;
-            left: {{ config.left_offset }}px;
-            bottom: 0;
+            left: {{ mini_config.offset_x }}px;
+            bottom: {{ mini_config.offset_y }}px;
             border: none;">
         </iframe>
 
         <!-- Etykieta kortu -->
-        <div class="kort-label"
-     style="position: absolute;
-            {% if config.label_position == 'top-left' %}
-              top: 4px; left: 6px;
-            {% elif config.label_position == 'top-right' %}
-              top: 4px; right: 6px;
-            {% elif config.label_position == 'bottom-left' %}
-              bottom: 4px; left: 6px;
-            {% elif config.label_position == 'bottom-right' %}
-              bottom: 4px; right: 6px;
-            {% elif config.label_position == 'top-center' %}
-              top: 4px; left: 50%; transform: translateX(-50%);
-            {% elif config.label_position == 'bottom-center' %}
-              bottom: 4px; left: 50%; transform: translateX(-50%);
-            {% endif %}">
-  Kort {{ i }}
-</div>
+        <div class="kort-label" style="{{ mini_label_style }}">
+          Kort {{ i }}
+        </div>
 
       </div>
     {% endfor %}

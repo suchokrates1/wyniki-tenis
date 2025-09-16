@@ -28,8 +28,6 @@
 
     .kort-container {
       position: absolute;
-      width: {{ config.view_width * config.display_scale }}px;
-      height: {{ config.view_height * config.display_scale }}px;
       overflow: hidden;
       border-radius: 12px;
       box-shadow: 0 0 12px rgba(0, 0, 0, 0.6);
@@ -39,11 +37,7 @@
     .kort-frame {
       width: 1920px;
       height: 1080px;
-      transform: scale({{ config.display_scale }});
-      transform-origin: bottom left;
       position: absolute;
-      left: {{ config.left_offset }}px;
-      bottom: 0;
       border: none;
     }
 
@@ -60,23 +54,14 @@
 <body>
   <div class="stage">
     {% for kort in overlays %}
-      <div class="kort-container" style="{{ kort.position.style }}" data-position="{{ kort.position.name }}">
-        <iframe class="kort-frame" src="{{ kort.overlay }}" title="Kort {{ kort.id }}"></iframe>
-        <div class="kort-label"
-             style="position: absolute;
-                    {% if config.label_position == 'top-left' %}
-                      top: 6px; left: 8px;
-                    {% elif config.label_position == 'top-right' %}
-                      top: 6px; right: 8px;
-                    {% elif config.label_position == 'bottom-left' %}
-                      bottom: 6px; left: 8px;
-                    {% elif config.label_position == 'bottom-right' %}
-                      bottom: 6px; right: 8px;
-                    {% elif config.label_position == 'top-center' %}
-                      top: 6px; left: 50%; transform: translateX(-50%);
-                    {% elif config.label_position == 'bottom-center' %}
-                      bottom: 6px; left: 50%; transform: translateX(-50%);
-                    {% endif %}">
+      <div class="kort-container"
+           style="{{ kort.position.style }} width: {{ kort.config.view_width * kort.config.display_scale }}px; height: {{ kort.config.view_height * kort.config.display_scale }}px;"
+           data-position="{{ kort.position.name }}">
+        <iframe class="kort-frame"
+                src="{{ kort.overlay }}"
+                title="Kort {{ kort.id }}"
+                style="transform: scale({{ kort.config.display_scale }}); transform-origin: bottom left; left: {{ kort.config.offset_x }}px; bottom: {{ kort.config.offset_y }}px;"></iframe>
+        <div class="kort-label" style="{{ kort.label_style }}">
           Kort {{ kort.id }}
         </div>
       </div>
