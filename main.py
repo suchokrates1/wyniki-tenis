@@ -188,6 +188,17 @@ def build_label_style(label_config):
 
     return " ".join(style_parts)
 
+
+def render_config(config_dict):
+    return render_template(
+        "config.html",
+        config=config_dict,
+        corners=CORNERS,
+        corner_labels=CORNER_LABELS,
+        corner_positions=CORNER_POSITION_STYLES,
+    )
+
+
 # Stałe linki do overlayów
 with open(LINKS_PATH) as f:
     OVERLAY_LINKS = json.load(f)
@@ -292,21 +303,9 @@ def config():
         data["kort_all"] = kort_all
         saved_config = save_config(data)
 
-        return render_template(
-            "config.html",
-            config=saved_config,
-            corners=CORNERS,
-            corner_labels=CORNER_LABELS,
-            corner_positions=CORNER_POSITION_STYLES,
-        )
+        return render_config(saved_config)
 
-    return render_template(
-        "config.html",
-        config=current_config,
-        corners=CORNERS,
-        corner_labels=CORNER_LABELS,
-        corner_positions=CORNER_POSITION_STYLES,
-    )
+    return render_config(current_config)
 
 
 if __name__ == "__main__":
