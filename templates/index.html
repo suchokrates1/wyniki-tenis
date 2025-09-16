@@ -1,0 +1,18 @@
+<!DOCTYPE html>
+<html lang="pl">
+<head>
+  <meta charset="UTF-8">
+  <title>Wybierz kort</title>
+  <link href="https://cdn.jsdelivr.net/npm/tailwindcss@2.2.19/dist/tailwind.min.css" rel="stylesheet">
+</head>
+<body class="bg-gray-900 text-white flex items-center justify-center min-h-screen">
+  <div class="text-center space-y-6">
+    <h1 class="text-3xl font-bold">Wybierz kort</h1>
+    <div class="space-x-4">
+      {% for i, link in links.items() %}
+      <a href="{{ link.control }}" class="px-6 py-3 bg-purple-600 hover:bg-purple-500 rounded text-white text-lg">Kort {{ i }}</a>
+      {% endfor %}
+    </div>
+  </div>
+</body>
+</html>

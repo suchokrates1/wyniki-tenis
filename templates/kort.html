@@ -1,0 +1,103 @@
+<!DOCTYPE html>
+<html lang="pl">
+<head>
+  <meta charset="UTF-8" />
+  <title>Kort {{ kort_id }}</title>
+  <style>
+    html, body {
+      margin: 0;
+      padding: 0;
+      overflow: hidden;
+      background: transparent;
+    }
+
+    .overlay-main {
+      position: absolute;
+      top: 0;
+      left: 0;
+      width: 1920px;
+      height: 1080px;
+      border: none;
+      z-index: 0;
+    }
+
+    .top-strip {
+      position: absolute;
+      top: 0;
+      left: 0;
+      width: 100%;
+      display: flex;
+      justify-content: space-evenly;
+      align-items: flex-start;
+      padding-top: 10px;
+      z-index: 10;
+      background: transparent;
+    }
+
+    .kort-label {
+      font-family: sans-serif;
+      font-size: 16px;
+      font-weight: 700;
+      color: white;
+      text-shadow: 1px 1px 2px black;
+      background: rgba(0, 0, 0, 0.6);
+      padding: 3px 8px;
+      border-radius: 6px;
+    }
+  </style>
+</head>
+<body>
+
+  <!-- Główna nakładka -->
+  <iframe class="overlay-main" src="{{ main_overlay }}"></iframe>
+
+  <!-- Pasek górny z miniaturami -->
+  <div class="top-strip">
+    {% for i, url in mini_overlays %}
+      <div class="mini-overlay"
+           style="width: {{ config.view_width * config.display_scale }}px;
+                  height: {{ config.view_height * config.display_scale }}px;
+                  position: relative;
+                  overflow: hidden;
+                  border-radius: 8px;
+                  box-shadow: 0 0 8px rgba(255, 255, 255, 0.4);
+                  background: rgba(0, 0, 0, 0.4);">
+
+        <!-- Przesunięty fragment wycinka -->
+        <iframe
+          src="{{ url }}"
+          style="
+            width: 1920px;
+            height: 1080px;
+            transform: scale({{ config.display_scale }});
+            transform-origin: bottom left;
+            position: absolute;
+            left: {{ config.left_offset }}px;
+            bottom: 0;
+            border: none;">
+        </iframe>
+
+        <!-- Etykieta kortu -->
+        <div class="kort-label"
+     style="position: absolute;
+            {% if config.label_position == 'top-left' %}
+              top: 4px; left: 6px;
+            {% elif config.label_position == 'top-right' %}
+              top: 4px; right: 6px;
+            {% elif config.label_position == 'bottom-left' %}
+              bottom: 4px; left: 6px;
+            {% elif config.label_position == 'bottom-right' %}
+              bottom: 4px; right: 6px;
+            {% elif config.label_position == 'top-center' %}
+              top: 4px; left: 50%; transform: translateX(-50%);
+            {% elif config.label_position == 'bottom-center' %}
+              bottom: 4px; left: 50%; transform: translateX(-50%);
+            {% endif %}">
+  Kort {{ i }}
+</div>
+
+      </div>
+    {% endfor %}
+  </div>
+</body>
+</html>

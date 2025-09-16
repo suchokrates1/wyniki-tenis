@@ -1,0 +1,49 @@
+<!DOCTYPE html>
+<html lang="pl">
+<head>
+  <meta charset="UTF-8">
+  <title>Konfiguracja Overlay</title>
+  <link href="https://cdn.jsdelivr.net/npm/tailwindcss@2.2.19/dist/tailwind.min.css" rel="stylesheet">
+</head>
+<body class="bg-gray-900 text-white min-h-screen flex items-center justify-center">
+  <form method="post" class="bg-gray-800 p-8 rounded shadow-md space-y-6 w-full max-w-md">
+    <h1 class="text-2xl font-bold mb-4">⚙️ Konfiguracja wycinków</h1>
+
+    <label class="block">
+      <span>📐 Szerokość wycinka (px)</span>
+      <input type="number" name="view_width" value="{{ config.view_width }}" class="w-full p-2 rounded bg-gray-700 text-white" />
+    </label>
+
+    <label class="block">
+      <span>📏 Wysokość wycinka (px)</span>
+      <input type="number" name="view_height" value="{{ config.view_height }}" class="w-full p-2 rounded bg-gray-700 text-white" />
+    </label>
+
+    <label class="block">
+      <span>🔍 Skala wyświetlania</span>
+      <input type="number" step="0.1" name="display_scale" value="{{ config.display_scale }}" class="w-full p-2 rounded bg-gray-700 text-white" />
+    </label>
+
+    <label class="block">
+      <span>↔️ Przesunięcie w lewo (px)</span>
+      <input type="number" name="left_offset" value="{{ config.left_offset }}" class="w-full p-2 rounded bg-gray-700 text-white" />
+    </label>
+
+    <label class="block">
+      <span>📍 Pozycja napisu „Kort X”</span>
+      <select name="label_position" class="w-full p-2 rounded bg-gray-700 text-white">
+        {% for pos in ["top-left", "top-center", "top-right", "bottom-left", "bottom-center", "bottom-right"] %}
+          <option value="{{ pos }}" {% if config.label_position == pos %}selected{% endif %}>
+            {{ pos.replace('-', ' ').capitalize() }}
+          </option>
+        {% endfor %}
+      </select>
+    </label>
+
+    <div class="flex justify-between pt-4">
+      <button type="submit" class="bg-green-600 hover:bg-green-500 px-4 py-2 rounded">💾 Zapisz</button>
+      <a href="/" class="text-gray-300 underline">← Wróć</a>
+    </div>
+  </form>
+</body>
+</html>
