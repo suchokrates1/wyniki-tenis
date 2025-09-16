@@ -8,10 +8,13 @@
 <body class="bg-gray-900 text-white flex items-center justify-center min-h-screen">
   <div class="text-center space-y-6">
     <h1 class="text-3xl font-bold">Wybierz kort</h1>
-    <div class="space-x-4">
-      {% for i, link in links.items() %}
-      <a href="{{ link.control }}" class="px-6 py-3 bg-purple-600 hover:bg-purple-500 rounded text-white text-lg">Kort {{ i }}</a>
-      {% endfor %}
+    <div class="space-y-4">
+      <div class="flex flex-wrap justify-center gap-4">
+        {% for i, link in links.items() %}
+        <a href="{{ link.control }}" class="px-6 py-3 bg-purple-600 hover:bg-purple-500 rounded text-white text-lg">Kort {{ i }}</a>
+        {% endfor %}
+      </div>
+      <a href="{{ url_for('config') }}" class="inline-block px-6 py-3 bg-gray-700 hover:bg-gray-600 rounded text-white text-lg font-semibold">Ustawienia overlayu</a>
     </div>
   </div>
 </body>
