@@ -3,5 +3,55 @@
   "view_height": 150,
   "display_scale": 0.8,
   "left_offset": -30,
-  "label_position": "top-left"
+  "label_position": "top-left",
+  "kort_all": {
+    "top_left": {
+      "view_width": 690,
+      "view_height": 150,
+      "display_scale": 0.8,
+      "offset_x": -30,
+      "offset_y": 0,
+      "label": {
+        "position": "top-left",
+        "offset_x": 8,
+        "offset_y": 6
+      }
+    },
+    "top_right": {
+      "view_width": 690,
+      "view_height": 150,
+      "display_scale": 0.8,
+      "offset_x": -30,
+      "offset_y": 0,
+      "label": {
+        "position": "top-right",
+        "offset_x": 8,
+        "offset_y": 6
+      }
+    },
+    "bottom_left": {
+      "view_width": 690,
+      "view_height": 150,
+      "display_scale": 0.8,
+      "offset_x": -30,
+      "offset_y": 0,
+      "label": {
+        "position": "bottom-left",
+        "offset_x": 8,
+        "offset_y": 6
+      }
+    },
+    "bottom_right": {
+      "view_width": 690,
+      "view_height": 150,
+      "display_scale": 0.8,
+      "offset_x": -30,
+      "offset_y": 0,
+      "label": {
+        "position": "bottom-right",
+        "offset_x": 8,
+        "offset_y": 6
+      }
+    }
+  }
 }

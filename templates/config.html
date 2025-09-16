@@ -5,45 +5,256 @@
   <title>Konfiguracja Overlay</title>
   <link href="https://cdn.jsdelivr.net/npm/tailwindcss@2.2.19/dist/tailwind.min.css" rel="stylesheet">
 </head>
-<body class="bg-gray-900 text-white min-h-screen flex items-center justify-center">
-  <form method="post" class="bg-gray-800 p-8 rounded shadow-md space-y-6 w-full max-w-md">
-    <h1 class="text-2xl font-bold mb-4">⚙️ Konfiguracja wycinków</h1>
+<body class="bg-gray-900 text-white min-h-screen">
+  <main class="max-w-6xl mx-auto py-10 px-4 space-y-10">
+    <form id="config-form" method="post" class="bg-gray-800/80 backdrop-blur rounded-2xl shadow-xl border border-gray-700/60 w-full p-8 space-y-8">
+      <header class="space-y-2">
+        <h1 class="text-3xl font-semibold flex items-center gap-3">⚙️ Konfiguracja wycinków</h1>
+        <p class="text-sm text-gray-300">Dostosuj parametry widoków pojedynczych i wszystkich kortów. Zmiany zapisują się w pliku konfiguracyjnym.</p>
+      </header>
 
-    <label class="block">
-      <span>📐 Szerokość wycinka (px)</span>
-      <input type="number" name="view_width" value="{{ config.view_width }}" class="w-full p-2 rounded bg-gray-700 text-white" />
-    </label>
+      <section class="space-y-4">
+        <h2 class="text-xl font-semibold flex items-center gap-2">🧭 Ustawienia ogólne</h2>
+        <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+          <label class="block text-sm space-y-1">
+            <span class="text-gray-200">📐 Szerokość wycinka (px)</span>
+            <input type="number" name="view_width" value="{{ config.view_width }}" min="1" step="1" class="w-full p-2 rounded bg-gray-700 text-white focus:outline-none focus:ring-2 focus:ring-emerald-500/60">
+          </label>
+          <label class="block text-sm space-y-1">
+            <span class="text-gray-200">📏 Wysokość wycinka (px)</span>
+            <input type="number" name="view_height" value="{{ config.view_height }}" min="1" step="1" class="w-full p-2 rounded bg-gray-700 text-white focus:outline-none focus:ring-2 focus:ring-emerald-500/60">
+          </label>
+          <label class="block text-sm space-y-1">
+            <span class="text-gray-200">🔍 Skala wyświetlania</span>
+            <input type="number" step="0.05" min="0" name="display_scale" value="{{ config.display_scale }}" class="w-full p-2 rounded bg-gray-700 text-white focus:outline-none focus:ring-2 focus:ring-emerald-500/60">
+          </label>
+          <label class="block text-sm space-y-1">
+            <span class="text-gray-200">↔️ Przesunięcie w lewo (px)</span>
+            <input type="number" name="left_offset" value="{{ config.left_offset }}" step="1" class="w-full p-2 rounded bg-gray-700 text-white focus:outline-none focus:ring-2 focus:ring-emerald-500/60">
+          </label>
+          <label class="block text-sm space-y-1 md:col-span-2">
+            <span class="text-gray-200">📍 Pozycja napisu „Kort X”</span>
+            <select name="label_position" class="w-full p-2 rounded bg-gray-700 text-white focus:outline-none focus:ring-2 focus:ring-emerald-500/60">
+              {% for pos in ["top-left", "top-center", "top-right", "bottom-left", "bottom-center", "bottom-right"] %}
+                <option value="{{ pos }}" {% if config.label_position == pos %}selected{% endif %}>{{ pos|replace('-', ' ')|title }}</option>
+              {% endfor %}
+            </select>
+          </label>
+        </div>
+      </section>
 
-    <label class="block">
-      <span>📏 Wysokość wycinka (px)</span>
-      <input type="number" name="view_height" value="{{ config.view_height }}" class="w-full p-2 rounded bg-gray-700 text-white" />
-    </label>
+      <section class="space-y-4">
+        <h2 class="text-xl font-semibold flex items-center gap-2">🎯 Ustawienia narożników</h2>
+        <p class="text-sm text-gray-300">Każdy narożnik może mieć własny rozmiar wycinka, skalę, offset oraz ustawienia etykiety.</p>
+        <div class="space-y-6">
+          {% for corner in corners %}
+            {% set corner_config = config.kort_all[corner] %}
+            <fieldset class="border border-gray-700/60 rounded-xl p-6 bg-gray-900/40 space-y-4">
+              <legend class="px-2 text-lg font-semibold text-emerald-300 uppercase tracking-wider">{{ corner_labels[corner] }}</legend>
+              <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+                <label class="block text-sm space-y-1">
+                  <span class="text-gray-200">📐 Szerokość (px)</span>
+                  <input type="number" name="kort_all[{{ corner }}][view_width]" value="{{ corner_config.view_width }}" min="1" step="1" data-corner="{{ corner }}" data-field="view_width" class="w-full p-2 rounded bg-gray-700 text-white focus:outline-none focus:ring-2 focus:ring-emerald-500/60">
+                </label>
+                <label class="block text-sm space-y-1">
+                  <span class="text-gray-200">📏 Wysokość (px)</span>
+                  <input type="number" name="kort_all[{{ corner }}][view_height]" value="{{ corner_config.view_height }}" min="1" step="1" data-corner="{{ corner }}" data-field="view_height" class="w-full p-2 rounded bg-gray-700 text-white focus:outline-none focus:ring-2 focus:ring-emerald-500/60">
+                </label>
+                <label class="block text-sm space-y-1">
+                  <span class="text-gray-200">🔍 Skala</span>
+                  <input type="number" name="kort_all[{{ corner }}][display_scale]" value="{{ corner_config.display_scale }}" step="0.05" min="0" data-corner="{{ corner }}" data-field="display_scale" class="w-full p-2 rounded bg-gray-700 text-white focus:outline-none focus:ring-2 focus:ring-emerald-500/60">
+                </label>
+                <label class="block text-sm space-y-1">
+                  <span class="text-gray-200">↔️ Offset X (px)</span>
+                  <input type="number" name="kort_all[{{ corner }}][offset_x]" value="{{ corner_config.offset_x }}" step="1" data-corner="{{ corner }}" data-field="offset_x" class="w-full p-2 rounded bg-gray-700 text-white focus:outline-none focus:ring-2 focus:ring-emerald-500/60">
+                </label>
+                <label class="block text-sm space-y-1 md:col-span-2">
+                  <span class="text-gray-200">↕️ Offset Y (px)</span>
+                  <input type="number" name="kort_all[{{ corner }}][offset_y]" value="{{ corner_config.offset_y }}" step="1" data-corner="{{ corner }}" data-field="offset_y" class="w-full p-2 rounded bg-gray-700 text-white focus:outline-none focus:ring-2 focus:ring-emerald-500/60">
+                </label>
+                <div class="md:col-span-2 bg-gray-800/40 border border-gray-700/50 rounded-lg p-4 space-y-3">
+                  <h3 class="text-sm font-semibold uppercase tracking-widest text-gray-300">Etykieta</h3>
+                  <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
+                    <label class="block text-sm space-y-1">
+                      <span class="text-gray-200">📍 Pozycja</span>
+                      <select name="kort_all[{{ corner }}][label][position]" data-corner="{{ corner }}" data-label-field="position" class="w-full p-2 rounded bg-gray-700 text-white focus:outline-none focus:ring-2 focus:ring-emerald-500/60">
+                        {% for pos in ["top-left", "top-center", "top-right", "bottom-left", "bottom-center", "bottom-right"] %}
+                          <option value="{{ pos }}" {% if corner_config.label.position == pos %}selected{% endif %}>{{ pos|replace('-', ' ')|title }}</option>
+                        {% endfor %}
+                      </select>
+                    </label>
+                    <label class="block text-sm space-y-1">
+                      <span class="text-gray-200">↔️ Offset etykiety X (px)</span>
+                      <input type="number" name="kort_all[{{ corner }}][label][offset_x]" value="{{ corner_config.label.offset_x }}" step="1" data-corner="{{ corner }}" data-label-field="offset_x" class="w-full p-2 rounded bg-gray-700 text-white focus:outline-none focus:ring-2 focus:ring-emerald-500/60">
+                    </label>
+                    <label class="block text-sm space-y-1">
+                      <span class="text-gray-200">↕️ Offset etykiety Y (px)</span>
+                      <input type="number" name="kort_all[{{ corner }}][label][offset_y]" value="{{ corner_config.label.offset_y }}" step="1" data-corner="{{ corner }}" data-label-field="offset_y" class="w-full p-2 rounded bg-gray-700 text-white focus:outline-none focus:ring-2 focus:ring-emerald-500/60">
+                    </label>
+                  </div>
+                </div>
+              </div>
+            </fieldset>
+          {% endfor %}
+        </div>
+      </section>
 
-    <label class="block">
-      <span>🔍 Skala wyświetlania</span>
-      <input type="number" step="0.1" name="display_scale" value="{{ config.display_scale }}" class="w-full p-2 rounded bg-gray-700 text-white" />
-    </label>
+      <div class="flex flex-wrap justify-between items-center gap-4 pt-4">
+        <button type="submit" class="bg-emerald-600 hover:bg-emerald-500 transition-colors px-6 py-2 rounded-lg font-semibold">💾 Zapisz</button>
+        <a href="/" class="text-gray-300 underline hover:text-white">← Wróć</a>
+      </div>
+    </form>
 
-    <label class="block">
-      <span>↔️ Przesunięcie w lewo (px)</span>
-      <input type="number" name="left_offset" value="{{ config.left_offset }}" class="w-full p-2 rounded bg-gray-700 text-white" />
-    </label>
+    <section class="w-full bg-gray-800/80 border border-gray-700/60 rounded-2xl p-8 space-y-4 shadow-lg">
+      <div class="flex items-center gap-2">
+        <h2 class="text-xl font-semibold">👀 Podgląd ustawień</h2>
+        <span class="text-xs uppercase tracking-widest text-gray-400">Aktualizuje się w czasie rzeczywistym</span>
+      </div>
+      <p class="text-sm text-gray-300">Podgląd reprezentuje scenę o rozdzielczości 1920×1080. Zmiany w formularzu natychmiast aktualizują rozmiary i pozycje placeholderów.</p>
+      <div class="overflow-auto rounded-xl border border-gray-700/80 bg-gray-900/80 p-4">
+        <div id="preview-stage" class="relative mx-auto" style="width: 1920px; height: 1080px; transform: scale(0.5); transform-origin: top left;">
+          {% for corner in corners %}
+            {% set corner_config = config.kort_all[corner] %}
+            <div class="preview-card absolute border border-emerald-400/40 rounded-xl bg-emerald-500/10 text-emerald-100/90 overflow-hidden" data-corner="{{ corner }}" style="{{ corner_positions[corner].style }} width: {{ corner_config.view_width * corner_config.display_scale }}px; height: {{ corner_config.view_height * corner_config.display_scale }}px;">
+              <div class="preview-overlay absolute inset-0 bg-gradient-to-br from-emerald-400/10 to-transparent pointer-events-none"></div>
+              <div class="preview-frame absolute bg-gray-500/30 border border-emerald-300/40 rounded-lg" data-preview-frame></div>
+              <span class="preview-label absolute text-[10px] font-semibold uppercase tracking-widest bg-black/70 px-2 py-1 rounded" data-preview-label>{{ corner_labels[corner] }}</span>
+            </div>
+          {% endfor %}
+        </div>
+      </div>
+    </section>
+  </main>
 
-    <label class="block">
-      <span>📍 Pozycja napisu „Kort X”</span>
-      <select name="label_position" class="w-full p-2 rounded bg-gray-700 text-white">
-        {% for pos in ["top-left", "top-center", "top-right", "bottom-left", "bottom-center", "bottom-right"] %}
-          <option value="{{ pos }}" {% if config.label_position == pos %}selected{% endif %}>
-            {{ pos.replace('-', ' ').capitalize() }}
-          </option>
-        {% endfor %}
-      </select>
-    </label>
+  <script>
+    (function () {
+      const form = document.getElementById('config-form');
+      const previewStage = document.getElementById('preview-stage');
+      if (!form || !previewStage) {
+        return;
+      }
 
-    <div class="flex justify-between pt-4">
-      <button type="submit" class="bg-green-600 hover:bg-green-500 px-4 py-2 rounded">💾 Zapisz</button>
-      <a href="/" class="text-gray-300 underline">← Wróć</a>
-    </div>
-  </form>
+      const corners = {{ corners|tojson }};
+      const defaults = {{ config.kort_all|tojson }};
+      const cornerLabels = {{ corner_labels|tojson }};
+
+      function coerceNumber(value, fallback) {
+        const parsed = Number(value);
+        return Number.isFinite(parsed) ? parsed : fallback;
+      }
+
+      function parseFieldValue(field) {
+        if (field.type === 'number') {
+          if (field.value === '') {
+            return NaN;
+          }
+          const parsed = Number(field.value);
+          return Number.isFinite(parsed) ? parsed : NaN;
+        }
+        return field.value;
+      }
+
+      function readCornerConfig(corner) {
+        const base = defaults[corner] || {};
+        const baseLabel = base.label || {};
+        const result = {
+          view_width: coerceNumber(base.view_width, 0),
+          view_height: coerceNumber(base.view_height, 0),
+          display_scale: coerceNumber(base.display_scale, 0),
+          offset_x: coerceNumber(base.offset_x, 0),
+          offset_y: coerceNumber(base.offset_y, 0),
+          label: {
+            position: baseLabel.position || 'top-left',
+            offset_x: coerceNumber(baseLabel.offset_x, 0),
+            offset_y: coerceNumber(baseLabel.offset_y, 0),
+          },
+        };
+
+        const fields = form.querySelectorAll(`[data-corner="${corner}"]`);
+        fields.forEach((field) => {
+          const value = parseFieldValue(field);
+          if (field.dataset.field) {
+            if (typeof value === 'number') {
+              if (Number.isFinite(value)) {
+                result[field.dataset.field] = value;
+              }
+            } else if (value !== undefined && value !== null && value !== '') {
+              result[field.dataset.field] = value;
+            }
+          } else if (field.dataset.labelField) {
+            if (typeof value === 'number') {
+              if (Number.isFinite(value)) {
+                result.label[field.dataset.labelField] = value;
+              }
+            } else if (value) {
+              result.label[field.dataset.labelField] = value;
+            }
+          }
+        });
+
+        return result;
+      }
+
+      function applyLabelStyle(label, data) {
+        label.style.top = '';
+        label.style.bottom = '';
+        label.style.left = '';
+        label.style.right = '';
+        label.style.transform = '';
+
+        const position = data.label.position || 'top-left';
+        const offsetX = Number.isFinite(data.label.offset_x) ? data.label.offset_x : 0;
+        const offsetY = Number.isFinite(data.label.offset_y) ? data.label.offset_y : 0;
+
+        if (position.includes('top')) {
+          label.style.top = `${offsetY}px`;
+        } else {
+          label.style.bottom = `${offsetY}px`;
+        }
+
+        if (position.includes('center')) {
+          label.style.left = `calc(50% + ${offsetX}px)`;
+          label.style.transform = 'translateX(-50%)';
+        } else if (position.includes('right')) {
+          label.style.right = `${offsetX}px`;
+        } else {
+          label.style.left = `${offsetX}px`;
+        }
+      }
+
+      function updatePreview() {
+        corners.forEach((corner) => {
+          const card = previewStage.querySelector(`[data-corner="${corner}"]`);
+          if (!card) {
+            return;
+          }
+          const data = readCornerConfig(corner);
+          const width = data.view_width * data.display_scale;
+          const height = data.view_height * data.display_scale;
+
+          card.style.width = `${Math.max(width, 0)}px`;
+          card.style.height = `${Math.max(height, 0)}px`;
+
+          const frame = card.querySelector('[data-preview-frame]');
+          if (frame) {
+            frame.style.transform = `scale(${data.display_scale})`;
+            frame.style.transformOrigin = 'bottom left';
+            frame.style.left = `${data.offset_x}px`;
+            frame.style.bottom = `${data.offset_y}px`;
+          }
+
+          const label = card.querySelector('[data-preview-label]');
+          if (label) {
+            label.textContent = cornerLabels[corner] || 'Kort';
+            applyLabelStyle(label, data);
+          }
+        });
+      }
+
+      form.addEventListener('input', updatePreview);
+      form.addEventListener('change', updatePreview);
+      updatePreview();
+    })();
+  </script>
 </body>
 </html>
