@@ -4,6 +4,11 @@
   <meta charset="UTF-8">
   <title>Konfiguracja Overlay</title>
   <link href="https://cdn.jsdelivr.net/npm/tailwindcss@2.2.19/dist/tailwind.min.css" rel="stylesheet">
+  <style>
+    #preview-wrapper {
+      max-height: 70vh;
+    }
+  </style>
 </head>
 <body class="bg-gray-900 text-white min-h-screen">
   <main class="max-w-6xl mx-auto py-10 px-4 space-y-10">
@@ -111,8 +116,8 @@
         <span class="text-xs uppercase tracking-widest text-gray-400">Aktualizuje się w czasie rzeczywistym</span>
       </div>
       <p class="text-sm text-gray-300">Podgląd reprezentuje scenę o rozdzielczości 1920×1080. Zmiany w formularzu natychmiast aktualizują rozmiary i pozycje placeholderów.</p>
-      <div class="overflow-auto rounded-xl border border-gray-700/80 bg-gray-900/80 p-4">
-        <div id="preview-stage" class="relative mx-auto" style="width: 1920px; height: 1080px; transform: scale(0.5); transform-origin: top left;">
+      <div id="preview-wrapper" class="overflow-hidden relative w-full rounded-xl border border-gray-700/80 bg-gray-900/80 p-4">
+        <div id="preview-stage" class="relative" style="width: 1920px; height: 1080px;">
           {% for corner in corners %}
             {% set corner_config = config.kort_all[corner] %}
             <div class="preview-card absolute border border-emerald-400/40 rounded-xl bg-emerald-500/10 text-emerald-100/90 overflow-hidden" data-corner="{{ corner }}" style="{{ corner_positions[corner].style }} width: {{ corner_config.view_width * corner_config.display_scale }}px; height: {{ corner_config.view_height * corner_config.display_scale }}px;">
@@ -130,7 +135,8 @@
     (function () {
       const form = document.getElementById('config-form');
       const previewStage = document.getElementById('preview-stage');
-      if (!form || !previewStage) {
+      const previewWrapper = document.getElementById('preview-wrapper');
+      if (!form || !previewStage || !previewWrapper) {
         return;
       }
 
@@ -222,6 +228,22 @@
         }
       }
 
+      function resizePreview() {
+        const wrapperStyles = window.getComputedStyle(previewWrapper);
+        const paddingX = parseFloat(wrapperStyles.paddingLeft || '0') + parseFloat(wrapperStyles.paddingRight || '0');
+        const paddingY = parseFloat(wrapperStyles.paddingTop || '0') + parseFloat(wrapperStyles.paddingBottom || '0');
+
+        const availableWidth = Math.max(previewWrapper.clientWidth - paddingX, 0);
+        const availableHeight = Math.max(previewWrapper.clientHeight - paddingY, 0);
+        if (availableWidth === 0 || availableHeight === 0) {
+          return;
+        }
+
+        const scale = Math.min(availableWidth / 1920, availableHeight / 1080);
+        previewStage.style.transformOrigin = 'top left';
+        previewStage.style.transform = `scale(${scale})`;
+      }
+
       function updatePreview() {
         corners.forEach((corner) => {
           const card = previewStage.querySelector(`[data-corner="${corner}"]`);
@@ -249,10 +271,13 @@
             applyLabelStyle(label, data);
           }
         });
+
+        resizePreview();
       }
 
       form.addEventListener('input', updatePreview);
       form.addEventListener('change', updatePreview);
+      window.addEventListener('resize', resizePreview);
       updatePreview();
     })();
   </script>
