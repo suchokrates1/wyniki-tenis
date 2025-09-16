@@ -42,6 +42,41 @@ def overlay_kort(kort_id):
     )
 
 
+@app.route("/kort/all")
+def overlay_all():
+    """Renderuje widok z czterema kortami rozmieszczonymi w rogach."""
+    with open(CONFIG_PATH) as f:
+        overlay_config = json.load(f)
+
+    corner_positions = [
+        {"name": "top-left", "style": "top: 0; left: 0;"},
+        {"name": "top-right", "style": "top: 0; right: 0;"},
+        {"name": "bottom-left", "style": "bottom: 0; left: 0;"},
+        {"name": "bottom-right", "style": "bottom: 0; right: 0;"},
+    ]
+
+    overlays = []
+    sorted_overlays = sorted(
+        OVERLAY_LINKS.items(),
+        key=lambda item: int(item[0]) if str(item[0]).isdigit() else item[0]
+    )
+
+    for (kort_id, data), position in zip(sorted_overlays, corner_positions):
+        overlays.append(
+            {
+                "id": kort_id,
+                "overlay": data["overlay"],
+                "position": position,
+            }
+        )
+
+    return render_template(
+        "kort_all.html",
+        overlays=overlays,
+        config=overlay_config,
+    )
+
+
 @app.route("/config", methods=["GET", "POST"])
 def config():
     if request.method == "POST":
