@@ -134,9 +134,9 @@
         return;
       }
 
-      const corners = {{ corners|tojson }};
-      const defaults = {{ config.kort_all|tojson }};
-      const cornerLabels = {{ corner_labels|tojson }};
+      const corners = {{ corners|default([])|tojson }};
+      const defaults = {{ config.kort_all|default({})|tojson }};
+      const cornerLabels = {{ corner_labels|default({})|tojson }};
 
       function coerceNumber(value, fallback) {
         const parsed = Number(value);
