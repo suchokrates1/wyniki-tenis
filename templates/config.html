@@ -35,6 +35,17 @@
       box-shadow: 0 0 8px rgba(16, 185, 129, 0.3);
     }
 
+    .preview-iframe {
+      position: absolute;
+      top: 0;
+      left: 0;
+      width: 1920px;
+      height: 1080px;
+      border: none;
+      pointer-events: none;
+      background: #000;
+    }
+
     .preview-main-frame {
       position: absolute;
       top: 0;
@@ -164,6 +175,7 @@
                 {% set corner_config = (config.get('kort_all', {})).get(corner, {}) %}
                 {% set label_config = (corner_config.get('label') or {}) %}
                 {% set corner_position = (corner_positions|default({})).get(corner, {}) %}
+                {% set corner_overlay = (corner_overlays|default({})).get(corner, {}) %}
                 {% set safe_scale = (corner_config.display_scale | default(1, true)) | float %}
                 {% set safe_width = (corner_config.view_width | default(690, true)) | float %}
                 {% set safe_height = (corner_config.view_height | default(150, true)) | float %}
@@ -171,8 +183,18 @@
                 {% set preview_height = (safe_height * safe_scale) | round(2) %}
                 <div class="preview-card absolute border border-emerald-400/40 rounded-xl bg-emerald-500/10 text-emerald-100/90 overflow-hidden" data-corner="{{ corner }}" style="{{ corner_position.get('style', '') }} width: {{ preview_width }}px; height: {{ preview_height }}px;">
                   <div class="preview-overlay absolute inset-0 bg-gradient-to-br from-emerald-400/10 to-transparent pointer-events-none"></div>
-                  <div class="preview-frame absolute bg-gray-500/30 border border-emerald-300/40 rounded-lg" data-preview-frame></div>
-                  <span class="preview-label absolute text-[10px] font-semibold uppercase tracking-widest bg-black/70 px-2 py-1 rounded" data-preview-label data-label-position="{{ label_config.get('position', 'top-left') }}" data-label-offset-x="{{ label_config.get('offset_x', 0) }}" data-label-offset-y="{{ label_config.get('offset_y', 0) }}">{{ (corner_labels|default({})).get(corner, 'Kort') }}</span>
+                  {% if corner_overlay.get('overlay') %}
+                    <iframe
+                      class="preview-iframe"
+                      data-preview-frame
+                      src="{{ corner_overlay.get('overlay') }}"
+                      title="Podgląd kortu {{ corner_overlay.get('id', '') }}"
+                      loading="lazy"
+                    ></iframe>
+                  {% else %}
+                    <div class="preview-frame absolute bg-gray-500/30 border border-emerald-300/40 rounded-lg" data-preview-frame></div>
+                  {% endif %}
+                  <span class="preview-label absolute text-[10px] font-semibold uppercase tracking-widest bg-black/70 px-2 py-1 rounded" data-preview-label data-label-position="{{ label_config.get('position', 'top-left') }}" data-label-offset-x="{{ label_config.get('offset_x', 0) }}" data-label-offset-y="{{ label_config.get('offset_y', 0) }}" data-kort-id="{{ corner_overlay.get('id') }}">{{ 'Kort ' ~ corner_overlay.get('id', (corner_labels|default({})).get(corner, 'Kort')) }}</span>
                 </div>
               {% endfor %}
             </div>
@@ -188,9 +210,20 @@
                 {% for corner in corner_keys %}
                   {% set corner_config = (config.get('kort_all', {})).get(corner, {}) %}
                   {% set label_config = (corner_config.get('label') or {}) %}
+                  {% set corner_overlay = (corner_overlays|default({})).get(corner, {}) %}
                   <div class="preview-mini-card" data-mini-card data-corner="{{ corner }}">
-                    <div class="preview-frame absolute bg-gray-500/30 border border-emerald-300/40 rounded-lg" data-preview-frame></div>
-                    <span class="preview-label absolute text-[10px] font-semibold uppercase tracking-widest bg-black/70 px-2 py-1 rounded" data-preview-label data-label-position="{{ label_config.get('position', 'top-left') }}" data-label-offset-x="{{ label_config.get('offset_x', 0) }}" data-label-offset-y="{{ label_config.get('offset_y', 0) }}">{{ (corner_labels|default({})).get(corner, 'Kort') }}</span>
+                    {% if corner_overlay.get('overlay') %}
+                      <iframe
+                        class="preview-iframe"
+                        data-preview-frame
+                        src="{{ corner_overlay.get('overlay') }}"
+                        title="Podgląd kortu {{ corner_overlay.get('id', '') }}"
+                        loading="lazy"
+                      ></iframe>
+                    {% else %}
+                      <div class="preview-frame absolute bg-gray-500/30 border border-emerald-300/40 rounded-lg" data-preview-frame></div>
+                    {% endif %}
+                    <span class="preview-label absolute text-[10px] font-semibold uppercase tracking-widest bg-black/70 px-2 py-1 rounded" data-preview-label data-label-position="{{ label_config.get('position', 'top-left') }}" data-label-offset-x="{{ label_config.get('offset_x', 0) }}" data-label-offset-y="{{ label_config.get('offset_y', 0) }}" data-kort-id="{{ corner_overlay.get('id') }}">{{ 'Kort ' ~ corner_overlay.get('id', (corner_labels|default({})).get(corner, 'Kort')) }}</span>
                   </div>
                 {% endfor %}
               </div>
@@ -226,8 +259,16 @@
       const corners = {{ corner_keys|tojson }};
       const defaults = {{ config.get('kort_all', {})|tojson }};
       const cornerLabels = {{ corner_labels|default({})|tojson }};
+      const overlaysByCorner = {{ corner_overlays|default({})|tojson }};
 
       function getCornerLabel(corner) {
+        if (overlaysByCorner && typeof overlaysByCorner === 'object' && Object.prototype.hasOwnProperty.call(overlaysByCorner, corner)) {
+          const mapping = overlaysByCorner[corner];
+          if (mapping && mapping.id) {
+            return `Kort ${mapping.id}`;
+          }
+        }
+
         if (cornerLabels && typeof cornerLabels === 'object' && Object.prototype.hasOwnProperty.call(cornerLabels, corner)) {
           const value = cornerLabels[corner];
           return value === undefined ? 'Kort' : value;

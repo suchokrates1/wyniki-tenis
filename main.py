@@ -189,19 +189,28 @@ def build_label_style(label_config):
     return " ".join(style_parts)
 
 
-def render_config(config_dict):
-    return render_template(
-        "config.html",
-        config=config_dict,
-        corners=CORNERS,
-        corner_labels=CORNER_LABELS,
-        corner_positions=CORNER_POSITION_STYLES,
-    )
-
 
 # Stałe linki do overlayów
 with open(LINKS_PATH) as f:
     OVERLAY_LINKS = json.load(f)
+
+
+def get_corner_overlay_mapping():
+    """Mapuje narożniki na odpowiadające im overlaye wynikające z konfiguracji."""
+
+    sorted_overlays = sorted(
+        OVERLAY_LINKS.items(),
+        key=lambda item: int(item[0]) if str(item[0]).isdigit() else item[0],
+    )
+
+    mapping = {}
+    for (kort_id, data), corner_key in zip(sorted_overlays, CORNERS):
+        mapping[corner_key] = {
+            "id": str(kort_id),
+            "overlay": data.get("overlay"),
+        }
+
+    return mapping
 
 
 @app.route("/")
@@ -242,12 +251,15 @@ def overlay_all():
     overlay_config = load_config()
 
     overlays = []
-    sorted_overlays = sorted(
-        OVERLAY_LINKS.items(),
-        key=lambda item: int(item[0]) if str(item[0]).isdigit() else item[0]
-    )
+    corner_mapping = get_corner_overlay_mapping()
 
-    for (kort_id, data), corner_key in zip(sorted_overlays, CORNERS):
+    for corner_key in CORNERS:
+        overlay_info = corner_mapping.get(corner_key)
+        if not overlay_info:
+            continue
+
+        kort_id = overlay_info["id"]
+        data = OVERLAY_LINKS.get(kort_id, {})
         corner_config = overlay_config["kort_all"].get(corner_key, get_default_corner_config(corner_key))
         overlays.append(
             {
@@ -270,6 +282,7 @@ def overlay_all():
 @app.route("/config", methods=["GET", "POST"])
 def config():
     current_config = load_config()
+    corner_mapping = get_corner_overlay_mapping()
 
     if request.method == "POST":
         form = request.form
@@ -304,9 +317,25 @@ def config():
         data["kort_all"] = kort_all
         saved_config = save_config(data)
 
-        return render_config(saved_config)
+        return render_template(
+            "config.html",
+            config=saved_config,
+            corners=CORNERS,
+            corner_labels=CORNER_LABELS,
+            corner_positions=CORNER_POSITION_STYLES,
+            corner_overlays=corner_mapping,
+            overlay_links=OVERLAY_LINKS,
+        )
 
-    return render_config(current_config)
+    return render_template(
+        "config.html",
+        config=current_config,
+        corners=CORNERS,
+        corner_labels=CORNER_LABELS,
+        corner_positions=CORNER_POSITION_STYLES,
+        corner_overlays=corner_mapping,
+        overlay_links=OVERLAY_LINKS,
+    )
 
 
 if __name__ == "__main__":

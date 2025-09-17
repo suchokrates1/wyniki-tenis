@@ -8,9 +8,10 @@ from main import (
     CORNERS,
     CORNER_LABELS,
     CORNER_POSITION_STYLES,
+    OVERLAY_LINKS,
     app,
+    get_corner_overlay_mapping,
     load_config,
-    render_config,
     save_config,
 )
 
@@ -124,17 +125,6 @@ def test_kort_all_renders_all_courts_with_labels(client):
     assert "transform: scale(0.9);" in html
 
 
-def test_config_template_renders_with_full_context():
-    config = load_config()
-
-    with app.app_context():
-        html = render_config(config)
-
-    assert "Konfiguracja Overlay" in html
-    for corner in CORNERS:
-        assert f'data-corner="{corner}"' in html
-
-
 def test_config_template_handles_missing_corner_labels():
     config = load_config()
 
@@ -144,6 +134,8 @@ def test_config_template_handles_missing_corner_labels():
             config=config,
             corners=CORNERS,
             corner_positions=CORNER_POSITION_STYLES,
+            corner_overlays=get_corner_overlay_mapping(),
+            overlay_links=OVERLAY_LINKS,
         )
 
     assert "Konfiguracja Overlay" in html
@@ -160,6 +152,8 @@ def test_config_template_handles_absent_corner_positions_context():
             config=config,
             corners=CORNERS,
             corner_labels=CORNER_LABELS,
+            corner_overlays=get_corner_overlay_mapping(),
+            overlay_links=OVERLAY_LINKS,
         )
 
     assert "Konfiguracja Overlay" in html
@@ -179,6 +173,8 @@ def test_config_template_handles_missing_corner_position_entries():
             corners=CORNERS,
             corner_labels=CORNER_LABELS,
             corner_positions=partial_positions,
+            corner_overlays=get_corner_overlay_mapping(),
+            overlay_links=OVERLAY_LINKS,
         )
 
     assert "Konfiguracja Overlay" in html
@@ -198,9 +194,21 @@ def test_config_preview_uses_safe_defaults_for_missing_corner_dimensions():
             corners=CORNERS,
             corner_labels=CORNER_LABELS,
             corner_positions={},
+            corner_overlays=get_corner_overlay_mapping(),
+            overlay_links=OVERLAY_LINKS,
         )
 
     assert "Konfiguracja Overlay" in html
     assert 'data-corner="top_left"' in html
     assert "width: 690.0px;" in html
     assert "height: 150.0px;" in html
+
+
+def test_config_preview_embeds_real_overlay_urls(client):
+    response = client.get("/config")
+
+    assert response.status_code == 200
+    html = response.get_data(as_text=True)
+
+    for overlay in OVERLAY_LINKS.values():
+        assert overlay["overlay"] in html
