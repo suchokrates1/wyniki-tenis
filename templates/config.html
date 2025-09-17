@@ -55,6 +55,7 @@
         <div class="space-y-6">
           {% for corner in corner_keys %}
             {% set corner_config = (config.get('kort_all', {})).get(corner, {}) %}
+            {% set label_config = (corner_config.get('label') or {}) %}
             <fieldset class="border border-gray-700/60 rounded-xl p-6 bg-gray-900/40 space-y-4">
               <legend class="px-2 text-lg font-semibold text-emerald-300 uppercase tracking-wider">{{ (corner_labels|default({})).get(corner, 'Kort') }}</legend>
               <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
@@ -85,17 +86,17 @@
                       <span class="text-gray-200">📍 Pozycja</span>
                       <select name="kort_all[{{ corner }}][label][position]" data-corner="{{ corner }}" data-label-field="position" class="w-full p-2 rounded bg-gray-700 text-white focus:outline-none focus:ring-2 focus:ring-emerald-500/60">
                         {% for pos in ["top-left", "top-center", "top-right", "bottom-left", "bottom-center", "bottom-right"] %}
-                          <option value="{{ pos }}" {% if corner_config.label.position == pos %}selected{% endif %}>{{ pos|replace('-', ' ')|title }}</option>
+                          <option value="{{ pos }}" {% if label_config.get('position', 'top-left') == pos %}selected{% endif %}>{{ pos|replace('-', ' ')|title }}</option>
                         {% endfor %}
                       </select>
                     </label>
                     <label class="block text-sm space-y-1">
                       <span class="text-gray-200">↔️ Offset etykiety X (px)</span>
-                      <input type="number" name="kort_all[{{ corner }}][label][offset_x]" value="{{ corner_config.label.offset_x }}" step="1" data-corner="{{ corner }}" data-label-field="offset_x" class="w-full p-2 rounded bg-gray-700 text-white focus:outline-none focus:ring-2 focus:ring-emerald-500/60">
+                      <input type="number" name="kort_all[{{ corner }}][label][offset_x]" value="{{ label_config.get('offset_x', 0) }}" step="1" data-corner="{{ corner }}" data-label-field="offset_x" class="w-full p-2 rounded bg-gray-700 text-white focus:outline-none focus:ring-2 focus:ring-emerald-500/60">
                     </label>
                     <label class="block text-sm space-y-1">
                       <span class="text-gray-200">↕️ Offset etykiety Y (px)</span>
-                      <input type="number" name="kort_all[{{ corner }}][label][offset_y]" value="{{ corner_config.label.offset_y }}" step="1" data-corner="{{ corner }}" data-label-field="offset_y" class="w-full p-2 rounded bg-gray-700 text-white focus:outline-none focus:ring-2 focus:ring-emerald-500/60">
+                      <input type="number" name="kort_all[{{ corner }}][label][offset_y]" value="{{ label_config.get('offset_y', 0) }}" step="1" data-corner="{{ corner }}" data-label-field="offset_y" class="w-full p-2 rounded bg-gray-700 text-white focus:outline-none focus:ring-2 focus:ring-emerald-500/60">
                     </label>
                   </div>
                 </div>
@@ -121,6 +122,7 @@
         <div id="preview-stage" class="relative" style="width: 1920px; height: 1080px;">
           {% for corner in corner_keys %}
             {% set corner_config = (config.get('kort_all', {})).get(corner, {}) %}
+            {% set label_config = (corner_config.get('label') or {}) %}
             <div class="preview-card absolute border border-emerald-400/40 rounded-xl bg-emerald-500/10 text-emerald-100/90 overflow-hidden" data-corner="{{ corner }}" style="{{ corner_positions[corner].style }} width: {{ (corner_config.view_width | default(0)) * (corner_config.display_scale | default(0)) }}px; height: {{ (corner_config.view_height | default(0)) * (corner_config.display_scale | default(0)) }}px;">
               <div class="preview-overlay absolute inset-0 bg-gradient-to-br from-emerald-400/10 to-transparent pointer-events-none"></div>
               <div class="preview-frame absolute bg-gray-500/30 border border-emerald-300/40 rounded-lg" data-preview-frame></div>
