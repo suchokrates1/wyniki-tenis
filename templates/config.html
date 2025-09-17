@@ -56,7 +56,7 @@
           {% for corner in corner_keys %}
             {% set corner_config = (config.get('kort_all', {})).get(corner, {}) %}
             <fieldset class="border border-gray-700/60 rounded-xl p-6 bg-gray-900/40 space-y-4">
-              <legend class="px-2 text-lg font-semibold text-emerald-300 uppercase tracking-wider">{{ corner_labels[corner] }}</legend>
+              <legend class="px-2 text-lg font-semibold text-emerald-300 uppercase tracking-wider">{{ (corner_labels|default({})).get(corner, 'Kort') }}</legend>
               <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
                 <label class="block text-sm space-y-1">
                   <span class="text-gray-200">📐 Szerokość (px)</span>
@@ -124,7 +124,7 @@
             <div class="preview-card absolute border border-emerald-400/40 rounded-xl bg-emerald-500/10 text-emerald-100/90 overflow-hidden" data-corner="{{ corner }}" style="{{ corner_positions[corner].style }} width: {{ (corner_config.view_width | default(0)) * (corner_config.display_scale | default(0)) }}px; height: {{ (corner_config.view_height | default(0)) * (corner_config.display_scale | default(0)) }}px;">
               <div class="preview-overlay absolute inset-0 bg-gradient-to-br from-emerald-400/10 to-transparent pointer-events-none"></div>
               <div class="preview-frame absolute bg-gray-500/30 border border-emerald-300/40 rounded-lg" data-preview-frame></div>
-              <span class="preview-label absolute text-[10px] font-semibold uppercase tracking-widest bg-black/70 px-2 py-1 rounded" data-preview-label>{{ corner_labels[corner] }}</span>
+              <span class="preview-label absolute text-[10px] font-semibold uppercase tracking-widest bg-black/70 px-2 py-1 rounded" data-preview-label>{{ (corner_labels|default({})).get(corner, 'Kort') }}</span>
             </div>
           {% endfor %}
         </div>
@@ -144,6 +144,14 @@
       const corners = {{ corner_keys|tojson }};
       const defaults = {{ config.get('kort_all', {})|tojson }};
       const cornerLabels = {{ corner_labels|default({})|tojson }};
+
+      function getCornerLabel(corner) {
+        if (cornerLabels && typeof cornerLabels === 'object' && Object.prototype.hasOwnProperty.call(cornerLabels, corner)) {
+          const value = cornerLabels[corner];
+          return value === undefined ? 'Kort' : value;
+        }
+        return 'Kort';
+      }
 
       function coerceNumber(value, fallback) {
         const parsed = Number(value);
@@ -268,7 +276,7 @@
 
           const label = card.querySelector('[data-preview-label]');
           if (label) {
-            label.textContent = cornerLabels[corner] || 'Kort';
+            label.textContent = getCornerLabel(corner);
             applyLabelStyle(label, data);
           }
         });
