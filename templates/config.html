@@ -235,17 +235,42 @@
         return 'Kort';
       }
 
+      function normalizeNumberInput(value) {
+        if (typeof value === 'number') {
+          return value;
+        }
+        if (typeof value === 'string') {
+          const trimmed = value.trim();
+          if (trimmed === '') {
+            return '';
+          }
+          return trimmed.replace(/,/g, '.');
+        }
+        return value;
+      }
+
       function coerceNumber(value, fallback) {
-        const parsed = Number(value);
+        const normalized = normalizeNumberInput(value);
+        if (normalized === '' || normalized === null || normalized === undefined) {
+          return fallback;
+        }
+        if (typeof normalized === 'number') {
+          return Number.isFinite(normalized) ? normalized : fallback;
+        }
+        const parsed = Number(normalized);
         return Number.isFinite(parsed) ? parsed : fallback;
       }
 
       function parseFieldValue(field) {
         if (field.type === 'number') {
-          if (field.value === '') {
+          const normalized = normalizeNumberInput(field.value);
+          if (normalized === '') {
             return NaN;
           }
-          const parsed = Number(field.value);
+          if (typeof normalized === 'number') {
+            return Number.isFinite(normalized) ? normalized : NaN;
+          }
+          const parsed = Number(normalized);
           return Number.isFinite(parsed) ? parsed : NaN;
         }
         return field.value;

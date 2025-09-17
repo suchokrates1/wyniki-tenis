@@ -2,6 +2,7 @@ import json
 from pathlib import Path
 
 import pytest
+from bs4 import BeautifulSoup
 
 from main import (
     CONFIG_PATH,
@@ -94,6 +95,40 @@ def test_post_config_accepts_comma_decimal_values(client):
     assert (
         written["kort_all"]["top_left"]["display_scale"] == pytest.approx(1.35)
     )
+
+
+def test_config_preview_uses_comma_decimal_values_in_styles(client):
+    payload = {
+        "kort_all[top_left][view_width]": "640",
+        "kort_all[top_left][view_height]": "200",
+        "kort_all[top_left][display_scale]": " 1,25 ",
+    }
+
+    response = client.post("/config", data=payload, follow_redirects=True)
+
+    assert response.status_code == 200
+
+    soup = BeautifulSoup(response.get_data(as_text=True), "html.parser")
+    card = soup.select_one('[data-preview-stage="all"] [data-corner="top_left"]')
+    assert card is not None
+
+    style = card.get("style", "")
+    assert "width" in style and "height" in style
+
+    def extract_px_value(style_text, property_name):
+        for declaration in style_text.split(";"):
+            name, _, value = declaration.partition(":")
+            if name.strip() == property_name:
+                cleaned = value.strip().removesuffix("px")
+                return float(cleaned)
+        return None
+
+    width_px = extract_px_value(style, "width")
+    height_px = extract_px_value(style, "height")
+
+    assert width_px is not None and height_px is not None
+    assert width_px == pytest.approx(640 * 1.25)
+    assert height_px == pytest.approx(200 * 1.25)
 
 
 def test_as_float_supports_dot_and_comma_decimal_separators():
