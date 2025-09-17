@@ -6,6 +6,7 @@ import pytest
 from main import (
     CONFIG_PATH,
     CORNERS,
+    CORNER_LABELS,
     CORNER_POSITION_STYLES,
     app,
     load_config,
@@ -147,3 +148,58 @@ def test_config_template_handles_missing_corner_labels():
     assert "Konfiguracja Overlay" in html
     for corner in CORNERS:
         assert f'data-corner="{corner}"' in html
+
+
+def test_config_template_handles_absent_corner_positions_context():
+    config = load_config()
+
+    with app.app_context():
+        template = app.jinja_env.get_template("config.html")
+        html = template.render(
+            config=config,
+            corners=CORNERS,
+            corner_labels=CORNER_LABELS,
+        )
+
+    assert "Konfiguracja Overlay" in html
+    for corner in CORNERS:
+        assert f'data-corner="{corner}"' in html
+    assert "width:" in html and "height:" in html
+
+
+def test_config_template_handles_missing_corner_position_entries():
+    config = load_config()
+    partial_positions = {"top_left": CORNER_POSITION_STYLES["top_left"]}
+
+    with app.app_context():
+        template = app.jinja_env.get_template("config.html")
+        html = template.render(
+            config=config,
+            corners=CORNERS,
+            corner_labels=CORNER_LABELS,
+            corner_positions=partial_positions,
+        )
+
+    assert "Konfiguracja Overlay" in html
+    for corner in CORNERS:
+        assert f'data-corner="{corner}"' in html
+    assert "width:" in html and "height:" in html
+
+
+def test_config_preview_uses_safe_defaults_for_missing_corner_dimensions():
+    config = load_config()
+    config.setdefault("kort_all", {})["top_left"] = {}
+
+    with app.app_context():
+        template = app.jinja_env.get_template("config.html")
+        html = template.render(
+            config=config,
+            corners=CORNERS,
+            corner_labels=CORNER_LABELS,
+            corner_positions={},
+        )
+
+    assert "Konfiguracja Overlay" in html
+    assert 'data-corner="top_left"' in html
+    assert "width: 690.0px;" in html
+    assert "height: 150.0px;" in html

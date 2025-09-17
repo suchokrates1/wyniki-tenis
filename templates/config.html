@@ -171,7 +171,12 @@
                 {% set label_offset_x = label_config.get('offset_x', 0) %}
                 {% set label_offset_y = label_config.get('offset_y', 0) %}
                 {% set corner_position = (corner_positions|default({})).get(corner, {}) %}
-                <div class="preview-card absolute border border-emerald-400/40 rounded-xl bg-emerald-500/10 text-emerald-100/90 overflow-hidden" data-corner="{{ corner }}" style="{{ corner_position.get('style', '') }} width: {{ (corner_config.view_width | default(0)) * (corner_config.display_scale | default(0)) }}px; height: {{ (corner_config.view_height | default(0)) * (corner_config.display_scale | default(0)) }}px;">
+                {% set safe_scale = (corner_config.display_scale | default(1, true)) | float %}
+                {% set safe_width = (corner_config.view_width | default(690, true)) | float %}
+                {% set safe_height = (corner_config.view_height | default(150, true)) | float %}
+                {% set preview_width = (safe_width * safe_scale) | round(2) %}
+                {% set preview_height = (safe_height * safe_scale) | round(2) %}
+                <div class="preview-card absolute border border-emerald-400/40 rounded-xl bg-emerald-500/10 text-emerald-100/90 overflow-hidden" data-corner="{{ corner }}" style="{{ corner_position.get('style', '') }} width: {{ preview_width }}px; height: {{ preview_height }}px;">
                   <div class="preview-overlay absolute inset-0 bg-gradient-to-br from-emerald-400/10 to-transparent pointer-events-none"></div>
                   <div class="preview-frame absolute bg-gray-500/30 border border-emerald-300/40 rounded-lg" data-preview-frame></div>
                   <span class="preview-label absolute text-[10px] font-semibold uppercase tracking-widest bg-black/70 px-2 py-1 rounded" data-preview-label data-label-position="{{ label_position }}" data-label-offset-x="{{ label_offset_x }}" data-label-offset-y="{{ label_offset_y }}">{{ safe_corner_labels.get(corner, 'Kort') }}</span>
