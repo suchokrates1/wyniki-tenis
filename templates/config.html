@@ -257,14 +257,23 @@
         if (typeof normalized === 'number') {
           return Number.isFinite(normalized) ? normalized : fallback;
         }
+        if (typeof normalized === 'string') {
+          const cleaned = normalized.replace(/,/g, '.');
+          const parsed = Number(cleaned);
+          return Number.isFinite(parsed) ? parsed : fallback;
+        }
         const parsed = Number(normalized);
         return Number.isFinite(parsed) ? parsed : fallback;
       }
 
       function parseFieldValue(field) {
         if (field.type === 'number') {
-          const normalized = normalizeNumberInput(field.value);
-          if (normalized === '') {
+          const rawValue = field.value;
+          const normalized =
+            typeof rawValue === 'string'
+              ? rawValue.trim().replace(/,/g, '.')
+              : normalizeNumberInput(rawValue);
+          if (normalized === '' || normalized === null || normalized === undefined) {
             return NaN;
           }
           if (typeof normalized === 'number') {
