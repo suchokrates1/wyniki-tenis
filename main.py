@@ -1,5 +1,6 @@
 import copy
 import json
+import logging
 import os
 from functools import wraps
 from urllib.parse import urlparse
@@ -7,6 +8,19 @@ from urllib.parse import urlparse
 from flask import Flask, jsonify, render_template, request, url_for
 from flask_cors import CORS
 from flask_sqlalchemy import SQLAlchemy
+
+def configure_logging():
+    level_name = os.environ.get("LOG_LEVEL", "INFO")
+    level = getattr(logging, level_name.upper(), logging.INFO)
+    logging.basicConfig(
+        level=level,
+        format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+    )
+    logging.getLogger().setLevel(level)
+
+
+configure_logging()
+logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
 CORS(app)
@@ -156,16 +170,24 @@ def ensure_overlay_links_seeded():
         return
 
     if not os.path.exists(LINKS_PATH):
+        logger.debug("Pomijam seedowanie linków - brak pliku %s", LINKS_PATH)
         return
 
     with open(LINKS_PATH, "r", encoding="utf-8") as f:
         data = json.load(f) or {}
 
     created = False
+    created_count = 0
     for kort_id, payload in data.items():
         overlay_url = (payload or {}).get("overlay")
         control_url = (payload or {}).get("control")
         if not (is_valid_url(overlay_url) and is_valid_url(control_url)):
+            logger.warning(
+                "Pominięto link dla kortu %s - niepoprawne adresy overlay=%s control=%s",
+                kort_id,
+                overlay_url,
+                control_url,
+            )
             continue
         link = OverlayLink(
             kort_id=str(kort_id),
@@ -174,9 +196,11 @@ def ensure_overlay_links_seeded():
         )
         db.session.add(link)
         created = True
+        created_count += 1
 
     if created:
         db.session.commit()
+        logger.info("Dodano %s linków do bazy overlay", created_count)
 
 
 def get_overlay_links():
