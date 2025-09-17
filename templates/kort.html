@@ -53,37 +53,79 @@
 
   <!-- Pasek górny z miniaturami -->
   <div class="top-strip">
-    {% for i, url in mini_overlays %}
-      <div class="mini-overlay"
-           style="width: {{ mini_config.view_width * mini_config.display_scale }}px;
-                  height: {{ mini_config.view_height * mini_config.display_scale }}px;
-                  position: relative;
-                  overflow: hidden;
-                  border-radius: 8px;
-                  box-shadow: 0 0 8px rgba(255, 255, 255, 0.4);
-                  background: rgba(0, 0, 0, 0.4);">
+    {% set default_mini_config = {
+      "view_width": 690,
+      "view_height": 150,
+      "display_scale": 0.8,
+      "offset_x": -30,
+      "offset_y": 0,
+      "label": {"position": "top-left", "offset_x": 8, "offset_y": 6},
+    } %}
+    {% if config is defined and config.kort_all is defined and config.kort_all.top_left is defined %}
+      {% set fallback_mini_config = config.kort_all.top_left %}
+    {% else %}
+      {% set fallback_mini_config = default_mini_config %}
+    {% endif %}
+    {% if mini_config is not defined or not mini_config %}
+      {% set mini_config = fallback_mini_config %}
+    {% endif %}
 
-        <!-- Przesunięty fragment wycinka -->
-        <iframe
-          src="{{ url }}"
-          style="
-            width: 1920px;
-            height: 1080px;
-            transform: scale({{ mini_config.display_scale }});
-            transform-origin: bottom left;
-            position: absolute;
-            left: {{ mini_config.offset_x }}px;
-            bottom: {{ mini_config.offset_y }}px;
-            border: none;">
-        </iframe>
+    {% set default_label_config = default_mini_config.label %}
+    {% set fallback_label_config = fallback_mini_config.label | default(default_label_config) %}
+    {% set active_label_config = mini_config.label | default(fallback_label_config) %}
+    {% set label_position = active_label_config.position | default(default_label_config.position) %}
+    {% set label_offset_x = active_label_config.offset_x | default(default_label_config.offset_x) %}
+    {% set label_offset_y = active_label_config.offset_y | default(default_label_config.offset_y) %}
+    {% set computed_label_style = "position: absolute;" %}
+    {% if "top" in label_position %}
+      {% set computed_label_style = computed_label_style ~ " top: " ~ label_offset_y ~ "px;" %}
+    {% else %}
+      {% set computed_label_style = computed_label_style ~ " bottom: " ~ label_offset_y ~ "px;" %}
+    {% endif %}
+    {% if "center" in label_position %}
+      {% set computed_label_style = computed_label_style ~ " left: calc(50% + " ~ label_offset_x ~ "px); transform: translateX(-50%);" %}
+    {% elif "right" in label_position %}
+      {% set computed_label_style = computed_label_style ~ " right: " ~ label_offset_x ~ "px;" %}
+    {% else %}
+      {% set computed_label_style = computed_label_style ~ " left: " ~ label_offset_x ~ "px;" %}
+    {% endif %}
+    {% set effective_label_style = mini_label_style | default(computed_label_style) %}
 
-        <!-- Etykieta kortu -->
-        <div class="kort-label" style="{{ mini_label_style }}">
-          Kort {{ i }}
+    {% if mini_config %}
+      {% for i, url in mini_overlays | default([]) %}
+        <div class="mini-overlay"
+             style="width: {{ (mini_config.view_width | default(fallback_mini_config.view_width | default(default_mini_config.view_width)))
+                                * (mini_config.display_scale | default(fallback_mini_config.display_scale | default(default_mini_config.display_scale))) }}px;
+                    height: {{ (mini_config.view_height | default(fallback_mini_config.view_height | default(default_mini_config.view_height)))
+                                 * (mini_config.display_scale | default(fallback_mini_config.display_scale | default(default_mini_config.display_scale))) }}px;
+                    position: relative;
+                    overflow: hidden;
+                    border-radius: 8px;
+                    box-shadow: 0 0 8px rgba(255, 255, 255, 0.4);
+                    background: rgba(0, 0, 0, 0.4);">
+
+          <!-- Przesunięty fragment wycinka -->
+          <iframe
+            src="{{ url }}"
+            style="
+              width: 1920px;
+              height: 1080px;
+              transform: scale({{ mini_config.display_scale | default(fallback_mini_config.display_scale | default(default_mini_config.display_scale)) }});
+              transform-origin: bottom left;
+              position: absolute;
+              left: {{ mini_config.offset_x | default(fallback_mini_config.offset_x | default(default_mini_config.offset_x)) }}px;
+              bottom: {{ mini_config.offset_y | default(fallback_mini_config.offset_y | default(default_mini_config.offset_y)) }}px;
+              border: none;">
+          </iframe>
+
+          <!-- Etykieta kortu -->
+          <div class="kort-label" style="{{ effective_label_style }}">
+            Kort {{ i }}
+          </div>
+
         </div>
-
-      </div>
-    {% endfor %}
+      {% endfor %}
+    {% endif %}
   </div>
 </body>
 </html>

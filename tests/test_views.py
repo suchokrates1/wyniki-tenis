@@ -1,4 +1,7 @@
 import pytest
+from flask import render_template
+
+from main import app as flask_app
 
 
 @pytest.mark.parametrize("kort_id", ["1", "2"])
@@ -32,3 +35,8 @@ def test_config_page_renders(client):
     html = response.get_data(as_text=True)
     assert "Konfiguracja Overlay" in html
     assert "UndefinedError" not in html
+
+
+def test_kort_template_with_empty_context():
+    with flask_app.app_context():
+        render_template("kort.html")
