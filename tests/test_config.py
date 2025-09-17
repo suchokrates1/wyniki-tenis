@@ -78,6 +78,17 @@ def test_post_config_updates_overlay_file(client):
     assert bottom_right["offset_x"] == -12
     assert bottom_right["label"]["position"] == "top-right"
 
+    comma_payload = {
+        "display_scale": "1,25",
+    }
+
+    response = client.post("/config", data=comma_payload, follow_redirects=True)
+
+    assert response.status_code == 200
+
+    written = json.loads(config_path.read_text())
+    assert written["display_scale"] == pytest.approx(1.25)
+
 
 def test_post_config_accepts_comma_decimal_values(client):
     payload = {
