@@ -3,11 +3,21 @@ import json
 import logging
 import os
 from functools import wraps
+from pathlib import Path
 from urllib.parse import urlparse
 
 from flask import Flask, jsonify, render_template, request, url_for
 from flask_cors import CORS
 from flask_sqlalchemy import SQLAlchemy
+from dotenv import load_dotenv
+
+
+BASE_DIR = Path(__file__).resolve().parent
+
+# Wczytujemy zmienne środowiskowe najpierw z bieżącego katalogu roboczego,
+# a następnie (bez nadpisywania istniejących wartości) z katalogu projektu.
+load_dotenv()
+load_dotenv(BASE_DIR / ".env", override=False)
 
 def configure_logging():
     level_name = os.environ.get("LOG_LEVEL", "INFO")
