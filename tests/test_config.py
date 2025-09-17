@@ -3,7 +3,15 @@ from pathlib import Path
 
 import pytest
 
-from main import CONFIG_PATH, CORNERS, CORNER_POSITION_STYLES, load_config, save_config
+from main import (
+    CONFIG_PATH,
+    CORNERS,
+    CORNER_POSITION_STYLES,
+    app,
+    load_config,
+    render_config,
+    save_config,
+)
 
 
 def test_get_config_renders_form_and_preview(client):
@@ -112,3 +120,30 @@ def test_kort_all_renders_all_courts_with_labels(client):
         assert f'data-position="{position}"' in html
     assert "Kort 1" in html and "Kort 4" in html
     assert "transform: scale(0.9);" in html
+
+
+def test_config_template_renders_with_full_context():
+    config = load_config()
+
+    with app.app_context():
+        html = render_config(config)
+
+    assert "Konfiguracja Overlay" in html
+    for corner in CORNERS:
+        assert f'data-corner="{corner}"' in html
+
+
+def test_config_template_handles_missing_corner_labels():
+    config = load_config()
+
+    with app.app_context():
+        template = app.jinja_env.get_template("config.html")
+        html = template.render(
+            config=config,
+            corners=CORNERS,
+            corner_positions=CORNER_POSITION_STYLES,
+        )
+
+    assert "Konfiguracja Overlay" in html
+    for corner in CORNERS:
+        assert f'data-corner="{corner}"' in html
