@@ -9,6 +9,7 @@ from main import (
     CORNER_LABELS,
     CORNER_POSITION_STYLES,
     app,
+    as_float,
     load_config,
     render_config,
     save_config,
@@ -75,6 +76,29 @@ def test_post_config_updates_overlay_file(client):
     assert bottom_right["view_width"] == 640
     assert bottom_right["offset_x"] == -12
     assert bottom_right["label"]["position"] == "top-right"
+
+
+def test_post_config_accepts_comma_decimal_values(client):
+    payload = {
+        "display_scale": "1,25",
+        "kort_all[top_left][display_scale]": "1,35",
+    }
+
+    response = client.post("/config", data=payload, follow_redirects=True)
+
+    assert response.status_code == 200
+
+    written = json.loads(Path(CONFIG_PATH).read_text())
+
+    assert written["display_scale"] == pytest.approx(1.25)
+    assert (
+        written["kort_all"]["top_left"]["display_scale"] == pytest.approx(1.35)
+    )
+
+
+def test_as_float_supports_dot_and_comma_decimal_separators():
+    assert as_float("1.25", 0.0) == pytest.approx(1.25)
+    assert as_float("1,25", 0.0) == pytest.approx(1.25)
 
 
 def test_kort_route_uses_overlay_configuration(client):
