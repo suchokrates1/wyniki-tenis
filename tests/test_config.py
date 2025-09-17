@@ -10,10 +10,26 @@ from main import (
     CORNER_POSITION_STYLES,
     OVERLAY_LINKS,
     app,
+    as_float,
     get_corner_overlay_mapping,
     load_config,
     save_config,
 )
+
+
+@pytest.mark.parametrize(
+    "value, default, expected",
+    [
+        ("1.25", 0.0, 1.25),
+        ("1,25", 0.0, 1.25),
+        (" 2,5 ", 0.0, 2.5),
+        ("", 0.0, 0.0),
+        (None, 0.0, 0.0),
+        ("not-a-number", 1.0, 1.0),
+    ],
+)
+def test_as_float_handles_decimal_separators(value, default, expected):
+    assert as_float(value, default) == expected
 
 
 def test_get_config_renders_form_and_preview(client):
@@ -32,18 +48,19 @@ def test_post_config_updates_overlay_file(client):
     payload = {
         "view_width": "720",
         "view_height": "180",
-        "display_scale": "1.2",
+        "display_scale": "1,25",
         "left_offset": "15",
         "label_position": "bottom-right",
         "kort_all[top_left][view_width]": "800",
         "kort_all[top_left][view_height]": "200",
-        "kort_all[top_left][display_scale]": "1.1",
+        "kort_all[top_left][display_scale]": "1,05",
         "kort_all[top_left][offset_x]": "45",
         "kort_all[top_left][offset_y]": "6",
         "kort_all[top_left][label][position]": "bottom-center",
         "kort_all[top_left][label][offset_x]": "12",
         "kort_all[top_left][label][offset_y]": "18",
         "kort_all[bottom_right][view_width]": "640",
+        "kort_all[bottom_right][display_scale]": "0,75",
         "kort_all[bottom_right][offset_x]": "-12",
         "kort_all[bottom_right][label][position]": "top-right",
     }
@@ -54,6 +71,7 @@ def test_post_config_updates_overlay_file(client):
     html = response.get_data(as_text=True)
     assert 'value="720"' in html
     assert 'option value="bottom-right" selected' in html
+    assert 'value="1.25"' in html
 
     config_path = Path(CONFIG_PATH)
     assert config_path.exists()
@@ -61,12 +79,13 @@ def test_post_config_updates_overlay_file(client):
 
     assert written["view_width"] == 720
     assert written["view_height"] == 180
-    assert written["display_scale"] == pytest.approx(1.2)
+    assert written["display_scale"] == pytest.approx(1.25)
     assert written["left_offset"] == 15
     assert written["label_position"] == "bottom-right"
 
     top_left = written["kort_all"]["top_left"]
     assert top_left["view_width"] == 800
+    assert top_left["display_scale"] == pytest.approx(1.05)
     assert top_left["offset_x"] == 45
     assert top_left["label"]["position"] == "bottom-center"
     assert top_left["label"]["offset_x"] == 12
@@ -74,8 +93,12 @@ def test_post_config_updates_overlay_file(client):
 
     bottom_right = written["kort_all"]["bottom_right"]
     assert bottom_right["view_width"] == 640
+    assert bottom_right["display_scale"] == pytest.approx(0.75)
     assert bottom_right["offset_x"] == -12
     assert bottom_right["label"]["position"] == "top-right"
+
+    assert "width: 840.0px;" in html
+    assert "height: 210.0px;" in html
 
 
 def test_kort_route_uses_overlay_configuration(client):

@@ -46,8 +46,17 @@ def as_int(value, default):
 
 
 def as_float(value, default):
+    if value is None:
+        return default
+
     try:
-        return float(value)
+        normalized = value
+        if isinstance(value, str):
+            normalized = value.strip().replace(",", ".")
+            if normalized == "":
+                raise ValueError
+
+        return float(normalized)
     except (TypeError, ValueError):
         return default
 
