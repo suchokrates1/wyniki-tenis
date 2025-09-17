@@ -218,7 +218,8 @@ def overlay_kort(kort_id):
 
     # HOT reload konfiguracji przy każdym żądaniu
     overlay_config = load_config()
-    mini_config = overlay_config["kort_all"].get("top_left", get_default_corner_config("top_left"))
+    kort_all_config = overlay_config.get("kort_all", {})
+    mini_config = kort_all_config.get("top_left") or get_default_corner_config("top_left")
     mini_label_style = build_label_style(mini_config.get("label"))
 
     main_overlay = OVERLAY_LINKS[kort_id]["overlay"]
