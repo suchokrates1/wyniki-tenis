@@ -4,7 +4,7 @@ import os
 from functools import wraps
 from urllib.parse import urlparse
 
-from flask import Flask, jsonify, render_template, request
+from flask import Flask, jsonify, render_template, request, url_for
 from flask_cors import CORS
 from flask_sqlalchemy import SQLAlchemy
 
@@ -461,7 +461,15 @@ def render_config(config_dict):
 @app.route("/")
 def index():
     links = overlay_links_by_kort_id()
-    return render_template("index.html", links=links)
+    links_management_url = None
+    if "overlay_links_page" in app.view_functions:
+        links_management_url = url_for("overlay_links_page")
+
+    return render_template(
+        "index.html",
+        links=links,
+        links_management_url=links_management_url,
+    )
 
 
 @app.route("/kort/<int:kort_id>")
