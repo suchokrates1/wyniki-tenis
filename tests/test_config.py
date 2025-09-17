@@ -80,8 +80,8 @@ def test_post_config_updates_overlay_file(client):
 
 def test_post_config_accepts_comma_decimal_values(client):
     payload = {
-        "display_scale": "1,25",
-        "kort_all[top_left][display_scale]": "1,35",
+        "display_scale": " 1,25 ",
+        "kort_all[top_left][display_scale]": " 1,35 ",
     }
 
     response = client.post("/config", data=payload, follow_redirects=True)
@@ -99,6 +99,7 @@ def test_post_config_accepts_comma_decimal_values(client):
 def test_as_float_supports_dot_and_comma_decimal_separators():
     assert as_float("1.25", 0.0) == pytest.approx(1.25)
     assert as_float("1,25", 0.0) == pytest.approx(1.25)
+    assert as_float(" 1,25 ", 0.0) == pytest.approx(1.25)
 
 
 def test_kort_route_uses_overlay_configuration(client):
