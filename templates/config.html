@@ -5,8 +5,45 @@
   <title>Konfiguracja Overlay</title>
   <link href="https://cdn.jsdelivr.net/npm/tailwindcss@2.2.19/dist/tailwind.min.css" rel="stylesheet">
   <style>
-    #preview-wrapper {
+    .preview-wrapper {
       max-height: 70vh;
+    }
+
+    .preview-stage {
+      width: 1920px;
+      height: 1080px;
+    }
+
+    .preview-top-strip {
+      position: absolute;
+      top: 0;
+      left: 0;
+      width: 100%;
+      display: flex;
+      justify-content: space-evenly;
+      align-items: flex-start;
+      padding-top: 10px;
+      gap: 16px;
+    }
+
+    .preview-mini-card {
+      position: relative;
+      overflow: hidden;
+      border-radius: 10px;
+      border: 1px solid rgba(16, 185, 129, 0.4);
+      background: rgba(16, 185, 129, 0.1);
+      box-shadow: 0 0 8px rgba(16, 185, 129, 0.3);
+    }
+
+    .preview-main-frame {
+      position: absolute;
+      top: 0;
+      left: 0;
+      width: 100%;
+      height: 100%;
+      border: 2px dashed rgba(16, 185, 129, 0.4);
+      border-radius: 16px;
+      background: linear-gradient(135deg, rgba(16, 185, 129, 0.08), transparent);
     }
   </style>
 </head>
@@ -118,17 +155,39 @@
         <span class="text-xs uppercase tracking-widest text-gray-400">Aktualizuje się w czasie rzeczywistym</span>
       </div>
       <p class="text-sm text-gray-300">Podgląd reprezentuje scenę o rozdzielczości 1920×1080. Zmiany w formularzu natychmiast aktualizują rozmiary i pozycje placeholderów.</p>
-      <div id="preview-wrapper" class="overflow-hidden relative w-full rounded-xl border border-gray-700/80 bg-gray-900/80 p-4">
-        <div id="preview-stage" class="relative" style="width: 1920px; height: 1080px;">
-          {% for corner in corner_keys %}
-            {% set corner_config = (config.get('kort_all', {})).get(corner, {}) %}
-            {% set label_config = (corner_config.get('label') or {}) %}
-            <div class="preview-card absolute border border-emerald-400/40 rounded-xl bg-emerald-500/10 text-emerald-100/90 overflow-hidden" data-corner="{{ corner }}" style="{{ corner_positions[corner].style }} width: {{ (corner_config.view_width | default(0)) * (corner_config.display_scale | default(0)) }}px; height: {{ (corner_config.view_height | default(0)) * (corner_config.display_scale | default(0)) }}px;">
-              <div class="preview-overlay absolute inset-0 bg-gradient-to-br from-emerald-400/10 to-transparent pointer-events-none"></div>
-              <div class="preview-frame absolute bg-gray-500/30 border border-emerald-300/40 rounded-lg" data-preview-frame></div>
-              <span class="preview-label absolute text-[10px] font-semibold uppercase tracking-widest bg-black/70 px-2 py-1 rounded" data-preview-label>{{ (corner_labels|default({})).get(corner, 'Kort') }}</span>
+      <div class="space-y-6">
+        <div class="space-y-3">
+          <h3 class="text-lg font-semibold text-gray-200">Siatka „Wszystkie korty”</h3>
+          <div id="preview-wrapper" class="preview-wrapper overflow-hidden relative w-full rounded-xl border border-gray-700/80 bg-gray-900/80 p-4" data-preview-wrapper>
+            <div id="preview-stage" class="preview-stage relative" data-preview-stage="all">
+              {% for corner in corner_keys %}
+                {% set corner_config = (config.get('kort_all', {})).get(corner, {}) %}
+                {% set label_config = (corner_config.get('label') or {}) %}
+                <div class="preview-card absolute border border-emerald-400/40 rounded-xl bg-emerald-500/10 text-emerald-100/90 overflow-hidden" data-corner="{{ corner }}" style="{{ corner_positions[corner].style }} width: {{ (corner_config.view_width | default(0)) * (corner_config.display_scale | default(0)) }}px; height: {{ (corner_config.view_height | default(0)) * (corner_config.display_scale | default(0)) }}px;">
+                  <div class="preview-overlay absolute inset-0 bg-gradient-to-br from-emerald-400/10 to-transparent pointer-events-none"></div>
+                  <div class="preview-frame absolute bg-gray-500/30 border border-emerald-300/40 rounded-lg" data-preview-frame></div>
+                  <span class="preview-label absolute text-[10px] font-semibold uppercase tracking-widest bg-black/70 px-2 py-1 rounded" data-preview-label>{{ (corner_labels|default({})).get(corner, 'Kort') }}</span>
+                </div>
+              {% endfor %}
             </div>
-          {% endfor %}
+          </div>
+        </div>
+
+        <div class="space-y-3">
+          <h3 class="text-lg font-semibold text-gray-200">Widok pojedynczego kortu</h3>
+          <div id="single-preview-wrapper" class="preview-wrapper overflow-hidden relative w-full rounded-xl border border-gray-700/80 bg-gray-900/80 p-4" data-preview-wrapper>
+            <div id="single-preview-stage" class="preview-stage relative" data-preview-stage="single">
+              <div class="preview-main-frame"></div>
+              <div class="preview-top-strip" data-preview-top-strip>
+                {% for corner in corner_keys %}
+                  <div class="preview-mini-card" data-mini-card data-corner="{{ corner }}">
+                    <div class="preview-frame absolute bg-gray-500/30 border border-emerald-300/40 rounded-lg" data-preview-frame></div>
+                    <span class="preview-label absolute text-[10px] font-semibold uppercase tracking-widest bg-black/70 px-2 py-1 rounded" data-preview-label>{{ (corner_labels|default({})).get(corner, 'Kort') }}</span>
+                  </div>
+                {% endfor %}
+              </div>
+            </div>
+          </div>
         </div>
       </div>
     </section>
@@ -137,9 +196,22 @@
   <script>
     (function () {
       const form = document.getElementById('config-form');
-      const previewStage = document.getElementById('preview-stage');
-      const previewWrapper = document.getElementById('preview-wrapper');
-      if (!form || !previewStage || !previewWrapper) {
+      const previewAreas = Array.from(document.querySelectorAll('[data-preview-wrapper]'))
+        .map((wrapper) => {
+          const stage = wrapper.querySelector('[data-preview-stage]');
+          if (!stage) {
+            return null;
+          }
+          return { wrapper, stage };
+        })
+        .filter(Boolean);
+      const allPreviewStage = document.querySelector('[data-preview-stage="all"]');
+      const singlePreviewStage = document.querySelector('[data-preview-stage="single"]');
+      const singlePreviewCards = singlePreviewStage
+        ? Array.from(singlePreviewStage.querySelectorAll('[data-mini-card]'))
+        : [];
+
+      if (!form || !allPreviewStage || previewAreas.length === 0) {
         return;
       }
 
@@ -240,24 +312,26 @@
       }
 
       function resizePreview() {
-        const wrapperStyles = window.getComputedStyle(previewWrapper);
-        const paddingX = parseFloat(wrapperStyles.paddingLeft || '0') + parseFloat(wrapperStyles.paddingRight || '0');
-        const paddingY = parseFloat(wrapperStyles.paddingTop || '0') + parseFloat(wrapperStyles.paddingBottom || '0');
+        previewAreas.forEach(({ wrapper, stage }) => {
+          const wrapperStyles = window.getComputedStyle(wrapper);
+          const paddingX = parseFloat(wrapperStyles.paddingLeft || '0') + parseFloat(wrapperStyles.paddingRight || '0');
+          const paddingY = parseFloat(wrapperStyles.paddingTop || '0') + parseFloat(wrapperStyles.paddingBottom || '0');
 
-        const availableWidth = Math.max(previewWrapper.clientWidth - paddingX, 0);
-        const availableHeight = Math.max(previewWrapper.clientHeight - paddingY, 0);
-        if (availableWidth === 0 || availableHeight === 0) {
-          return;
-        }
+          const availableWidth = Math.max(wrapper.clientWidth - paddingX, 0);
+          const availableHeight = Math.max(wrapper.clientHeight - paddingY, 0);
+          if (availableWidth === 0 || availableHeight === 0) {
+            return;
+          }
 
-        const scale = Math.min(availableWidth / 1920, availableHeight / 1080);
-        previewStage.style.transformOrigin = 'top left';
-        previewStage.style.transform = `scale(${scale})`;
+          const scale = Math.min(availableWidth / 1920, availableHeight / 1080);
+          stage.style.transformOrigin = 'top left';
+          stage.style.transform = `scale(${scale})`;
+        });
       }
 
       function updatePreview() {
         corners.forEach((corner) => {
-          const card = previewStage.querySelector(`[data-corner="${corner}"]`);
+          const card = allPreviewStage.querySelector(`[data-corner="${corner}"]`);
           if (!card) {
             return;
           }
@@ -282,6 +356,42 @@
             applyLabelStyle(label, data);
           }
         });
+
+        if (singlePreviewCards.length > 0) {
+          const topLeftConfig = readCornerConfig('top_left');
+          const miniWidth = topLeftConfig.view_width * topLeftConfig.display_scale;
+          const miniHeight = topLeftConfig.view_height * topLeftConfig.display_scale;
+          const labelConfig = topLeftConfig.label || {};
+          const miniLabelData = {
+            label: {
+              position: typeof labelConfig.position === 'string' && labelConfig.position
+                ? labelConfig.position
+                : 'top-left',
+              offset_x: coerceNumber(labelConfig.offset_x, 0),
+              offset_y: coerceNumber(labelConfig.offset_y, 0),
+            },
+          };
+
+          singlePreviewCards.forEach((card) => {
+            card.style.width = `${Math.max(miniWidth, 0)}px`;
+            card.style.height = `${Math.max(miniHeight, 0)}px`;
+
+            const frame = card.querySelector('[data-preview-frame]');
+            if (frame) {
+              frame.style.transform = `scale(${topLeftConfig.display_scale})`;
+              frame.style.transformOrigin = 'bottom left';
+              frame.style.left = `${topLeftConfig.offset_x}px`;
+              frame.style.bottom = `${topLeftConfig.offset_y}px`;
+            }
+
+            const label = card.querySelector('[data-preview-label]');
+            if (label) {
+              const labelCorner = card.dataset.corner;
+              label.textContent = getCornerLabel(labelCorner);
+              applyLabelStyle(label, miniLabelData);
+            }
+          });
+        }
 
         resizePreview();
       }
