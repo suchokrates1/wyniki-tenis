@@ -16,7 +16,9 @@
       </div>
       <div class="flex flex-col sm:flex-row gap-3 justify-center">
         <a href="{{ url_for('config') }}" class="inline-block px-6 py-3 bg-gray-700 hover:bg-gray-600 rounded text-white text-lg font-semibold">Ustawienia overlayu</a>
-        <a href="{{ url_for('overlay_links_page') }}" class="inline-block px-6 py-3 bg-blue-700 hover:bg-blue-600 rounded text-white text-lg font-semibold">Zarządzaj linkami</a>
+        {% if links_management_url %}
+        <a href="{{ links_management_url }}" class="inline-block px-6 py-3 bg-blue-700 hover:bg-blue-600 rounded text-white text-lg font-semibold">Zarządzaj linkami</a>
+        {% endif %}
       </div>
     </div>
   </div>
