@@ -1,0 +1,170 @@
+<!DOCTYPE html>
+<html lang="pl">
+<head>
+  <meta charset="UTF-8">
+  <title>Zarządzaj linkami overlay</title>
+  <link href="https://cdn.jsdelivr.net/npm/tailwindcss@2.2.19/dist/tailwind.min.css" rel="stylesheet">
+</head>
+<body class="bg-gray-900 text-white min-h-screen">
+  <div class="max-w-5xl mx-auto py-10 px-4 space-y-8">
+    <div class="flex items-center justify-between">
+      <h1 class="text-3xl font-bold">Linki do overlayów</h1>
+      <a href="{{ url_for('index') }}" class="text-sm text-purple-300 hover:text-purple-200">&larr; Powrót</a>
+    </div>
+
+    <section class="bg-gray-800 rounded-lg shadow p-6 space-y-4">
+      <h2 class="text-xl font-semibold">Dodaj nowy link</h2>
+      <form class="space-y-4" data-overlay-form data-method="POST" data-endpoint="{{ url_for('overlay_links_api') }}">
+        <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
+          <label class="block">
+            <span class="text-sm text-gray-300">ID kortu</span>
+            <input type="text" name="kort_id" class="mt-1 w-full rounded bg-gray-700 border border-gray-600 px-3 py-2" required>
+          </label>
+          <label class="block md:col-span-1">
+            <span class="text-sm text-gray-300">URL overlayu</span>
+            <input type="url" name="overlay" class="mt-1 w-full rounded bg-gray-700 border border-gray-600 px-3 py-2" required>
+          </label>
+          <label class="block md:col-span-1">
+            <span class="text-sm text-gray-300">URL panelu sterowania</span>
+            <input type="url" name="control" class="mt-1 w-full rounded bg-gray-700 border border-gray-600 px-3 py-2" required>
+          </label>
+        </div>
+        <button type="submit" class="px-4 py-2 bg-purple-600 rounded hover:bg-purple-500">Dodaj link</button>
+        <p class="text-sm text-red-400 hidden" data-feedback></p>
+      </form>
+    </section>
+
+    <section class="bg-gray-800 rounded-lg shadow p-6">
+      <h2 class="text-xl font-semibold mb-4">Istniejące linki</h2>
+      {% if links %}
+      <div class="space-y-6">
+        {% for link in links %}
+        <form class="bg-gray-900 rounded-lg p-4 space-y-3" data-overlay-form data-method="PUT" data-endpoint="{{ url_for('overlay_link_detail_api', link_id=link.id) }}">
+          <div class="grid grid-cols-1 md:grid-cols-6 gap-4 items-center">
+            <label class="block">
+              <span class="text-sm text-gray-300">ID kortu</span>
+              <input type="text" name="kort_id" value="{{ link.kort_id }}" class="mt-1 w-full rounded bg-gray-700 border border-gray-600 px-3 py-2" required>
+            </label>
+            <label class="block md:col-span-2">
+              <span class="text-sm text-gray-300">URL overlayu</span>
+              <input type="url" name="overlay" value="{{ link.overlay }}" class="mt-1 w-full rounded bg-gray-700 border border-gray-600 px-3 py-2" required>
+            </label>
+            <label class="block md:col-span-2">
+              <span class="text-sm text-gray-300">URL panelu sterowania</span>
+              <input type="url" name="control" value="{{ link.control }}" class="mt-1 w-full rounded bg-gray-700 border border-gray-600 px-3 py-2" required>
+            </label>
+            <div class="flex gap-2 items-end md:col-span-1 md:justify-end">
+              <button type="submit" class="px-4 py-2 bg-blue-600 rounded hover:bg-blue-500">Zapisz</button>
+              <button type="button" class="px-4 py-2 bg-red-600 rounded hover:bg-red-500" data-delete data-endpoint="{{ url_for('overlay_link_detail_api', link_id=link.id) }}">Usuń</button>
+            </div>
+          </div>
+          <p class="text-sm text-red-400 hidden" data-feedback></p>
+        </form>
+        {% endfor %}
+      </div>
+      {% else %}
+      <p class="text-gray-400">Brak zdefiniowanych linków.</p>
+      {% endif %}
+    </section>
+  </div>
+
+  <script>
+    function validateUrl(value) {
+      try {
+        const parsed = new URL(value);
+        return parsed.protocol === 'http:' || parsed.protocol === 'https:';
+      } catch (error) {
+        return false;
+      }
+    }
+
+    async function handleOverlayFormSubmit(event) {
+      event.preventDefault();
+      const form = event.currentTarget;
+      const feedback = form.querySelector('[data-feedback]');
+      if (feedback) {
+        feedback.classList.add('hidden');
+        feedback.textContent = '';
+      }
+
+      const formData = new FormData(form);
+      const payload = {
+        kort_id: formData.get('kort_id')?.trim(),
+        overlay: formData.get('overlay')?.trim(),
+        control: formData.get('control')?.trim(),
+      };
+
+      const errors = [];
+      if (!payload.kort_id) {
+        errors.push('ID kortu jest wymagane.');
+      }
+      if (!validateUrl(payload.overlay)) {
+        errors.push('Podaj poprawny adres URL overlayu.');
+      }
+      if (!validateUrl(payload.control)) {
+        errors.push('Podaj poprawny adres URL panelu sterowania.');
+      }
+
+      if (errors.length) {
+        if (feedback) {
+          feedback.textContent = errors.join(' ');
+          feedback.classList.remove('hidden');
+        }
+        return;
+      }
+
+      try {
+        const response = await fetch(form.dataset.endpoint, {
+          method: form.dataset.method || 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload),
+        });
+
+        if (!response.ok) {
+          const data = await response.json().catch(() => ({}));
+          const message = data.errors ? Object.values(data.errors).join(' ') : 'Nie udało się zapisać zmian.';
+          throw new Error(message);
+        }
+
+        window.location.reload();
+      } catch (error) {
+        if (feedback) {
+          feedback.textContent = error.message;
+          feedback.classList.remove('hidden');
+        }
+      }
+    }
+
+    async function handleOverlayDelete(event) {
+      event.preventDefault();
+      const button = event.currentTarget;
+      const endpoint = button.dataset.endpoint;
+      if (!endpoint) {
+        return;
+      }
+
+      if (!confirm('Czy na pewno chcesz usunąć ten link?')) {
+        return;
+      }
+
+      try {
+        const response = await fetch(endpoint, { method: 'DELETE' });
+        if (!response.ok) {
+          throw new Error('Nie udało się usunąć linku.');
+        }
+        window.location.reload();
+      } catch (error) {
+        alert(error.message);
+      }
+    }
+
+    document.querySelectorAll('[data-overlay-form]').forEach((form) => {
+      form.addEventListener('submit', handleOverlayFormSubmit);
+    });
+
+    document.querySelectorAll('[data-delete]').forEach((button) => {
+      button.addEventListener('click', handleOverlayDelete);
+    });
+  </script>
+</body>
+</html>

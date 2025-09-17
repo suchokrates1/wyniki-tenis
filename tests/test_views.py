@@ -53,3 +53,57 @@ def test_config_page_renders(client, auth_headers):
 def test_kort_template_with_empty_context():
     with flask_app.app_context():
         render_template("kort.html")
+
+
+def test_overlay_links_api_create_and_list(client):
+    payload = {
+        "kort_id": "99",
+        "overlay": "https://example.com/overlay",
+        "control": "https://example.com/control",
+    }
+    response = client.post("/api/overlay-links", json=payload)
+    assert response.status_code == 201
+    created = response.get_json()
+    assert created["kort_id"] == payload["kort_id"]
+
+    list_response = client.get("/api/overlay-links")
+    assert list_response.status_code == 200
+    links = list_response.get_json()
+    assert any(link["kort_id"] == payload["kort_id"] for link in links)
+
+
+def test_index_renders_links_from_database(client):
+    new_link = {
+        "kort_id": "77",
+        "overlay": "https://example.com/new-overlay",
+        "control": "https://example.com/new-control",
+    }
+    post_response = client.post("/api/overlay-links", json=new_link)
+    assert post_response.status_code == 201
+
+    response = client.get("/")
+    assert response.status_code == 200
+    html = response.get_data(as_text=True)
+    assert "Kort 77" in html
+    assert new_link["control"] in html
+
+
+def test_overlay_kort_uses_new_link(client):
+    new_link = {
+        "kort_id": "55",
+        "overlay": "https://example.com/overlay-55",
+        "control": "https://example.com/control-55",
+    }
+    create_response = client.post("/api/overlay-links", json=new_link)
+    assert create_response.status_code == 201
+
+    response = client.get("/kort/55")
+    assert response.status_code == 200
+    html = response.get_data(as_text=True)
+    assert new_link["overlay"] in html
+
+
+def test_overlay_links_page_renders(client):
+    response = client.get("/overlay-links")
+    assert response.status_code == 200
+    assert "Linki do overlayów" in response.get_data(as_text=True)
