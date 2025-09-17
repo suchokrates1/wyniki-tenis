@@ -50,7 +50,6 @@
 <body class="bg-gray-900 text-white min-h-screen">
   <main class="max-w-6xl mx-auto py-10 px-4 space-y-10">
     {% set corner_keys = corners if corners else ['top_left', 'top_right', 'bottom_left', 'bottom_right'] %}
-    {% set safe_corner_labels = corner_labels|default({}) %}
     <form id="config-form" method="post" class="bg-gray-800/80 backdrop-blur rounded-2xl shadow-xl border border-gray-700/60 w-full p-8 space-y-8">
       <header class="space-y-2">
         <h1 class="text-3xl font-semibold flex items-center gap-3">⚙️ Konfiguracja wycinków</h1>
@@ -95,7 +94,7 @@
             {% set corner_config = (config.get('kort_all', {})).get(corner, {}) %}
             {% set label_config = (corner_config.get('label') or {}) %}
             <fieldset class="border border-gray-700/60 rounded-xl p-6 bg-gray-900/40 space-y-4">
-              <legend class="px-2 text-lg font-semibold text-emerald-300 uppercase tracking-wider">{{ safe_corner_labels.get(corner, 'Kort') }}</legend>
+              <legend class="px-2 text-lg font-semibold text-emerald-300 uppercase tracking-wider">{{ (corner_labels|default({})).get(corner, 'Kort') }}</legend>
               <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
                 <label class="block text-sm space-y-1">
                   <span class="text-gray-200">📐 Szerokość (px)</span>
@@ -173,7 +172,7 @@
                 <div class="preview-card absolute border border-emerald-400/40 rounded-xl bg-emerald-500/10 text-emerald-100/90 overflow-hidden" data-corner="{{ corner }}" style="{{ corner_position.get('style', '') }} width: {{ preview_width }}px; height: {{ preview_height }}px;">
                   <div class="preview-overlay absolute inset-0 bg-gradient-to-br from-emerald-400/10 to-transparent pointer-events-none"></div>
                   <div class="preview-frame absolute bg-gray-500/30 border border-emerald-300/40 rounded-lg" data-preview-frame></div>
-                  <span class="preview-label absolute text-[10px] font-semibold uppercase tracking-widest bg-black/70 px-2 py-1 rounded" data-preview-label data-label-position="{{ label_config.get('position', 'top-left') }}" data-label-offset-x="{{ label_config.get('offset_x', 0) }}" data-label-offset-y="{{ label_config.get('offset_y', 0) }}">{{ safe_corner_labels.get(corner, 'Kort') }}</span>
+                  <span class="preview-label absolute text-[10px] font-semibold uppercase tracking-widest bg-black/70 px-2 py-1 rounded" data-preview-label data-label-position="{{ label_config.get('position', 'top-left') }}" data-label-offset-x="{{ label_config.get('offset_x', 0) }}" data-label-offset-y="{{ label_config.get('offset_y', 0) }}">{{ (corner_labels|default({})).get(corner, 'Kort') }}</span>
                 </div>
               {% endfor %}
             </div>
@@ -191,7 +190,7 @@
                   {% set label_config = (corner_config.get('label') or {}) %}
                   <div class="preview-mini-card" data-mini-card data-corner="{{ corner }}">
                     <div class="preview-frame absolute bg-gray-500/30 border border-emerald-300/40 rounded-lg" data-preview-frame></div>
-                    <span class="preview-label absolute text-[10px] font-semibold uppercase tracking-widest bg-black/70 px-2 py-1 rounded" data-preview-label data-label-position="{{ label_config.get('position', 'top-left') }}" data-label-offset-x="{{ label_config.get('offset_x', 0) }}" data-label-offset-y="{{ label_config.get('offset_y', 0) }}">{{ safe_corner_labels.get(corner, 'Kort') }}</span>
+                    <span class="preview-label absolute text-[10px] font-semibold uppercase tracking-widest bg-black/70 px-2 py-1 rounded" data-preview-label data-label-position="{{ label_config.get('position', 'top-left') }}" data-label-offset-x="{{ label_config.get('offset_x', 0) }}" data-label-offset-y="{{ label_config.get('offset_y', 0) }}">{{ (corner_labels|default({})).get(corner, 'Kort') }}</span>
                   </div>
                 {% endfor %}
               </div>
