@@ -89,7 +89,8 @@ def test_kort_route_uses_overlay_configuration(client):
     )
     save_config(config)
 
-    response = client.get("/kort/1")
+    kort_id = 1
+    response = client.get(f"/kort/{kort_id}")
 
     assert response.status_code == 200
     html = response.get_data(as_text=True)
