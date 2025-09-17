@@ -4,7 +4,7 @@ from flask import render_template
 from main import app as flask_app
 
 
-@pytest.mark.parametrize("kort_id", ["1", "2"])
+@pytest.mark.parametrize("kort_id", [1, 2])
 def test_overlay_kort_existing(client, kort_id):
     response = client.get(f"/kort/{kort_id}")
     assert response.status_code == 200
@@ -23,10 +23,23 @@ def test_overlay_all_view(client):
     assert "Kort 1" in html and "Kort 4" in html
 
 
+def test_overlay_all_route_registered():
+    rules = [rule.rule for rule in flask_app.url_map.iter_rules("overlay_all")]
+    assert "/kort/all" in rules
+
+
 def test_overlay_kort_not_found(client):
     response = client.get("/kort/999")
     assert response.status_code == 404
     assert "Nieznany kort" in response.get_data(as_text=True)
+
+
+def test_overlay_all_and_non_numeric_kort(client):
+    all_response = client.get("/kort/all")
+    assert all_response.status_code == 200
+
+    non_numeric_response = client.get("/kort/not-a-number")
+    assert non_numeric_response.status_code == 404
 
 
 def test_config_page_renders(client):

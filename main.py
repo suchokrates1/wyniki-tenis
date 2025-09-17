@@ -209,7 +209,7 @@ def index():
     return render_template("index.html", links=OVERLAY_LINKS)
 
 
-@app.route("/kort/<kort_id>")
+@app.route("/kort/<int:kort_id>")
 def overlay_kort(kort_id):
     kort_id = str(kort_id)
 
