@@ -1,8 +1,6 @@
-from pathlib import Path
-
 import pytest
 
-from main import CONFIG_PATH, app
+from main import app, db
 
 
 @pytest.fixture
@@ -13,17 +11,19 @@ def client():
 
 
 @pytest.fixture(autouse=True)
-def restore_config_file():
-    config_path = Path(CONFIG_PATH)
-    if config_path.exists():
-        original_bytes = config_path.read_bytes()
-    else:
-        original_bytes = None
+def restore_config_file(tmp_path):
+    database_path = tmp_path / "overlay.sqlite"
+    app.config.update(SQLALCHEMY_DATABASE_URI=f"sqlite:///{database_path}")
+
+    with app.app_context():
+        db.session.remove()
+        db.engine.dispose()
+        db.drop_all()
+        db.create_all()
 
     yield
 
-    if original_bytes is None:
-        if config_path.exists():
-            config_path.unlink()
-    else:
-        config_path.write_bytes(original_bytes)
+    with app.app_context():
+        db.session.remove()
+        db.drop_all()
+        db.engine.dispose()

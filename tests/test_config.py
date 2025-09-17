@@ -1,11 +1,7 @@
-import json
-from pathlib import Path
-
 import pytest
 from bs4 import BeautifulSoup
 
 from main import (
-    CONFIG_PATH,
     CORNERS,
     CORNER_LABELS,
     CORNER_POSITION_STYLES,
@@ -14,6 +10,7 @@ from main import (
     load_config,
     render_config,
     save_config,
+    OverlayConfig,
 )
 
 
@@ -56,9 +53,10 @@ def test_post_config_updates_overlay_file(client):
     assert 'value="720"' in html
     assert 'option value="bottom-right" selected' in html
 
-    config_path = Path(CONFIG_PATH)
-    assert config_path.exists()
-    written = json.loads(config_path.read_text())
+    with app.app_context():
+        stored = OverlayConfig.query.first()
+        assert stored is not None
+        written = stored.to_dict()
 
     assert written["view_width"] == 720
     assert written["view_height"] == 180
@@ -86,7 +84,8 @@ def test_post_config_updates_overlay_file(client):
 
     assert response.status_code == 200
 
-    written = json.loads(config_path.read_text())
+    with app.app_context():
+        written = OverlayConfig.query.first().to_dict()
     assert written["display_scale"] == pytest.approx(1.25)
 
 
@@ -100,7 +99,8 @@ def test_post_config_accepts_comma_decimal_values(client):
 
     assert response.status_code == 200
 
-    written = json.loads(Path(CONFIG_PATH).read_text())
+    with app.app_context():
+        written = OverlayConfig.query.first().to_dict()
 
     assert written["display_scale"] == pytest.approx(1.25)
     assert (
