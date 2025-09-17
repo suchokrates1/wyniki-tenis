@@ -141,6 +141,25 @@ def test_config_preview_uses_comma_decimal_values_in_styles(client):
     assert width_px == pytest.approx(640 * 1.25)
     assert height_px == pytest.approx(200 * 1.25)
 
+    overlay_response = client.get("/kort/all")
+    assert overlay_response.status_code == 200
+
+    overlay_soup = BeautifulSoup(overlay_response.get_data(as_text=True), "html.parser")
+    top_left_container = overlay_soup.select_one('[data-position="top-left"]')
+    assert top_left_container is not None
+
+    container_style = top_left_container.get("style", "")
+    container_width = extract_px_value(container_style, "width")
+    container_height = extract_px_value(container_style, "height")
+
+    assert container_width == pytest.approx(640 * 1.25)
+    assert container_height == pytest.approx(200 * 1.25)
+
+    iframe = top_left_container.select_one("iframe.kort-frame")
+    assert iframe is not None
+    iframe_style = iframe.get("style", "")
+    assert "scale(1.25)" in iframe_style
+
 
 def test_as_float_supports_dot_and_comma_decimal_separators():
     assert as_float("1.25", 0.0) == pytest.approx(1.25)
