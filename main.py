@@ -1,14 +1,23 @@
-from flask import Flask, render_template, request
-from flask_cors import CORS
 import copy
 import json
 import os
 
+from flask import Flask, render_template, request
+from flask_cors import CORS
+from flask_sqlalchemy import SQLAlchemy
+
 app = Flask(__name__)
 CORS(app)
 
+app.config.setdefault(
+    "SQLALCHEMY_DATABASE_URI",
+    os.environ.get("DATABASE_URL", "sqlite:///overlay.db"),
+)
+app.config.setdefault("SQLALCHEMY_TRACK_MODIFICATIONS", False)
+
+db = SQLAlchemy(app)
+
 LINKS_PATH = "overlay_links.json"
-CONFIG_PATH = "overlay_config.json"
 
 CORNERS = ["top_left", "top_right", "bottom_left", "bottom_right"]
 
@@ -33,6 +42,42 @@ DEFAULT_BASE_CONFIG = {
     "left_offset": -30,
     "label_position": "top-left",
 }
+
+
+class OverlayConfig(db.Model):
+    __tablename__ = "overlay_config"
+
+    id = db.Column(db.Integer, primary_key=True)
+    view_width = db.Column(db.Integer, nullable=False)
+    view_height = db.Column(db.Integer, nullable=False)
+    display_scale = db.Column(db.Float, nullable=False)
+    left_offset = db.Column(db.Integer, nullable=False)
+    label_position = db.Column(db.String(64), nullable=False)
+    kort_all = db.Column(db.Text, nullable=False)
+
+    def to_dict(self):
+        return ensure_config_structure(
+            {
+                "view_width": self.view_width,
+                "view_height": self.view_height,
+                "display_scale": self.display_scale,
+                "left_offset": self.left_offset,
+                "label_position": self.label_position,
+                "kort_all": json.loads(self.kort_all or "{}"),
+            }
+        )
+
+
+def serialize_overlay_config(data, instance=None):
+    ensured = ensure_config_structure(data)
+    target = instance or OverlayConfig()
+    target.view_width = ensured["view_width"]
+    target.view_height = ensured["view_height"]
+    target.display_scale = ensured["display_scale"]
+    target.left_offset = ensured["left_offset"]
+    target.label_position = ensured["label_position"]
+    target.kort_all = json.dumps(ensured["kort_all"])
+    return target, ensured
 
 
 def as_int(value, default):
@@ -154,20 +199,27 @@ def ensure_config_structure(config):
 
 
 def load_config():
-    if not os.path.exists(CONFIG_PATH):
-        return ensure_config_structure(dict(DEFAULT_BASE_CONFIG))
+    with app.app_context():
+        db.create_all()
+        record = OverlayConfig.query.first()
+        if not record:
+            record, ensured = serialize_overlay_config(dict(DEFAULT_BASE_CONFIG))
+            db.session.add(record)
+            db.session.commit()
+            return ensured
 
-    with open(CONFIG_PATH) as f:
-        raw_config = json.load(f)
-
-    return ensure_config_structure(raw_config)
+        return record.to_dict()
 
 
 def save_config(config):
-    prepared = ensure_config_structure(config)
-    with open(CONFIG_PATH, "w") as f:
-        json.dump(prepared, f, indent=2)
-    return prepared
+    with app.app_context():
+        db.create_all()
+        record = OverlayConfig.query.first()
+        record, ensured = serialize_overlay_config(config, instance=record)
+        if record.id is None:
+            db.session.add(record)
+        db.session.commit()
+        return ensured
 
 
 def build_label_style(label_config):
