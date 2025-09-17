@@ -2,8 +2,9 @@ import copy
 import json
 import os
 from functools import wraps
+from urllib.parse import urlparse
 
-from flask import Flask, render_template, request
+from flask import Flask, jsonify, render_template, request
 from flask_cors import CORS
 from flask_sqlalchemy import SQLAlchemy
 
@@ -17,8 +18,6 @@ app.config.setdefault(
 app.config.setdefault("SQLALCHEMY_TRACK_MODIFICATIONS", False)
 
 db = SQLAlchemy(app)
-
-LINKS_PATH = "overlay_links.json"
 
 CORNERS = ["top_left", "top_right", "bottom_left", "bottom_right"]
 
@@ -43,6 +42,8 @@ DEFAULT_BASE_CONFIG = {
     "left_offset": -30,
     "label_position": "top-left",
 }
+
+LINKS_PATH = "overlay_links.json"
 
 
 def get_config_auth_credentials():
@@ -109,6 +110,177 @@ def serialize_overlay_config(data, instance=None):
     target.label_position = ensured["label_position"]
     target.kort_all = json.dumps(ensured["kort_all"])
     return target, ensured
+
+
+class OverlayLink(db.Model):
+    __tablename__ = "overlay_links"
+
+    id = db.Column(db.Integer, primary_key=True)
+    kort_id = db.Column(db.String(128), unique=True, nullable=False)
+    overlay_url = db.Column(db.String(1024), nullable=False)
+    control_url = db.Column(db.String(1024), nullable=False)
+
+    def to_dict(self):
+        return {
+            "id": self.id,
+            "kort_id": self.kort_id,
+            "overlay": self.overlay_url,
+            "control": self.control_url,
+        }
+
+
+def is_valid_url(value):
+    if not value:
+        return False
+    try:
+        parsed = urlparse(value)
+    except ValueError:
+        return False
+    return parsed.scheme in {"http", "https"} and bool(parsed.netloc)
+
+
+def overlay_link_sort_key(link):
+    kort_id = link.kort_id
+    if isinstance(kort_id, str) and kort_id.isdigit():
+        return (0, int(kort_id))
+    try:
+        return (0, int(kort_id))
+    except (TypeError, ValueError):
+        pass
+    return (1, str(kort_id))
+
+
+def ensure_overlay_links_seeded():
+    db.create_all()
+    if OverlayLink.query.first() is not None:
+        return
+
+    if not os.path.exists(LINKS_PATH):
+        return
+
+    with open(LINKS_PATH, "r", encoding="utf-8") as f:
+        data = json.load(f) or {}
+
+    created = False
+    for kort_id, payload in data.items():
+        overlay_url = (payload or {}).get("overlay")
+        control_url = (payload or {}).get("control")
+        if not (is_valid_url(overlay_url) and is_valid_url(control_url)):
+            continue
+        link = OverlayLink(
+            kort_id=str(kort_id),
+            overlay_url=overlay_url,
+            control_url=control_url,
+        )
+        db.session.add(link)
+        created = True
+
+    if created:
+        db.session.commit()
+
+
+def get_overlay_links():
+    ensure_overlay_links_seeded()
+    links = OverlayLink.query.order_by(OverlayLink.kort_id.asc()).all()
+    return sorted(links, key=overlay_link_sort_key)
+
+
+def overlay_links_by_kort_id():
+    return {
+        link.kort_id: {"overlay": link.overlay_url, "control": link.control_url}
+        for link in get_overlay_links()
+    }
+
+
+def validate_overlay_link_data(data):
+    errors = {}
+    normalized = {}
+
+    kort_id = str((data or {}).get("kort_id", "")).strip()
+    if not kort_id:
+        errors["kort_id"] = "ID kortu jest wymagane."
+    else:
+        normalized["kort_id"] = kort_id
+
+    overlay_url = (data or {}).get("overlay")
+    if not is_valid_url(overlay_url):
+        errors["overlay"] = "Niepoprawny adres URL overlayu."
+    else:
+        normalized["overlay_url"] = overlay_url
+
+    control_url = (data or {}).get("control")
+    if not is_valid_url(control_url):
+        errors["control"] = "Niepoprawny adres URL panelu sterowania."
+    else:
+        normalized["control_url"] = control_url
+
+    return normalized, errors
+
+
+@app.route("/api/overlay-links", methods=["GET", "POST"])
+def overlay_links_api():
+    ensure_overlay_links_seeded()
+
+    if request.method == "GET":
+        return jsonify([link.to_dict() for link in get_overlay_links()])
+
+    payload, errors = validate_overlay_link_data(request.get_json(silent=True))
+    if errors:
+        return jsonify({"errors": errors}), 400
+
+    existing = OverlayLink.query.filter_by(kort_id=payload["kort_id"]).first()
+    if existing is not None:
+        return (
+            jsonify({"errors": {"kort_id": "Kort o podanym ID już istnieje."}}),
+            400,
+        )
+
+    link = OverlayLink(**payload)
+    db.session.add(link)
+    db.session.commit()
+    return jsonify(link.to_dict()), 201
+
+
+@app.route("/api/overlay-links/<int:link_id>", methods=["GET", "PUT", "DELETE"])
+def overlay_link_detail_api(link_id):
+    ensure_overlay_links_seeded()
+    link = OverlayLink.query.get(link_id)
+    if link is None:
+        return jsonify({"error": "Not found"}), 404
+
+    if request.method == "GET":
+        return jsonify(link.to_dict())
+
+    if request.method == "DELETE":
+        db.session.delete(link)
+        db.session.commit()
+        return ("", 204)
+
+    payload, errors = validate_overlay_link_data(request.get_json(silent=True))
+    if errors:
+        return jsonify({"errors": errors}), 400
+
+    existing = (
+        OverlayLink.query.filter(OverlayLink.id != link_id, OverlayLink.kort_id == payload["kort_id"])
+        .first()
+    )
+    if existing is not None:
+        return (
+            jsonify({"errors": {"kort_id": "Kort o podanym ID już istnieje."}}),
+            400,
+        )
+
+    link.kort_id = payload["kort_id"]
+    link.overlay_url = payload["overlay_url"]
+    link.control_url = payload["control_url"]
+    db.session.commit()
+    return jsonify(link.to_dict())
+
+
+@app.route("/overlay-links")
+def overlay_links_page():
+    links = [link.to_dict() for link in get_overlay_links()]
+    return render_template("overlay_links.html", links=links)
 
 
 def as_int(value, default):
@@ -286,21 +458,19 @@ def render_config(config_dict):
     )
 
 
-# Stałe linki do overlayów
-with open(LINKS_PATH) as f:
-    OVERLAY_LINKS = json.load(f)
-
-
 @app.route("/")
 def index():
-    return render_template("index.html", links=OVERLAY_LINKS)
+    links = overlay_links_by_kort_id()
+    return render_template("index.html", links=links)
 
 
 @app.route("/kort/<int:kort_id>")
 def overlay_kort(kort_id):
     kort_id = str(kort_id)
 
-    if kort_id not in OVERLAY_LINKS:
+    links_by_id = overlay_links_by_kort_id()
+
+    if kort_id not in links_by_id:
         return f"Nieznany kort {kort_id}", 404
 
     # HOT reload konfiguracji przy każdym żądaniu
@@ -309,8 +479,8 @@ def overlay_kort(kort_id):
     mini_config = kort_all_config.get("top_left") or get_default_corner_config("top_left")
     mini_label_style = build_label_style(mini_config.get("label"))
 
-    main_overlay = OVERLAY_LINKS[kort_id]["overlay"]
-    mini = [(k, v["overlay"]) for k, v in OVERLAY_LINKS.items() if k != kort_id]
+    main_overlay = links_by_id[kort_id]["overlay"]
+    mini = [(k, v["overlay"]) for k, v in links_by_id.items() if k != kort_id]
 
     return render_template(
         "kort.html",
@@ -329,17 +499,15 @@ def overlay_all():
     overlay_config = load_config()
 
     overlays = []
-    sorted_overlays = sorted(
-        OVERLAY_LINKS.items(),
-        key=lambda item: int(item[0]) if str(item[0]).isdigit() else item[0]
-    )
+    sorted_overlays = [link.to_dict() for link in get_overlay_links()]
 
-    for (kort_id, data), corner_key in zip(sorted_overlays, CORNERS):
+    for link, corner_key in zip(sorted_overlays, CORNERS):
+        kort_id = link["kort_id"]
         corner_config = overlay_config["kort_all"].get(corner_key, get_default_corner_config(corner_key))
         overlays.append(
             {
                 "id": kort_id,
-                "overlay": data["overlay"],
+                "overlay": link["overlay"],
                 "position": CORNER_POSITION_STYLES[corner_key],
                 "corner_key": corner_key,
                 "config": corner_config,
