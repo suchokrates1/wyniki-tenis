@@ -163,7 +163,8 @@
               {% for corner in corner_keys %}
                 {% set corner_config = (config.get('kort_all', {})).get(corner, {}) %}
                 {% set label_config = (corner_config.get('label') or {}) %}
-                <div class="preview-card absolute border border-emerald-400/40 rounded-xl bg-emerald-500/10 text-emerald-100/90 overflow-hidden" data-corner="{{ corner }}" style="{{ corner_positions[corner].style }} width: {{ (corner_config.view_width | default(0)) * (corner_config.display_scale | default(0)) }}px; height: {{ (corner_config.view_height | default(0)) * (corner_config.display_scale | default(0)) }}px;">
+                {% set corner_position = (corner_positions|default({})).get(corner, {}) %}
+                <div class="preview-card absolute border border-emerald-400/40 rounded-xl bg-emerald-500/10 text-emerald-100/90 overflow-hidden" data-corner="{{ corner }}" style="{{ corner_position.get('style', '') }} width: {{ (corner_config.view_width | default(0)) * (corner_config.display_scale | default(0)) }}px; height: {{ (corner_config.view_height | default(0)) * (corner_config.display_scale | default(0)) }}px;">
                   <div class="preview-overlay absolute inset-0 bg-gradient-to-br from-emerald-400/10 to-transparent pointer-events-none"></div>
                   <div class="preview-frame absolute bg-gray-500/30 border border-emerald-300/40 rounded-lg" data-preview-frame></div>
                   <span class="preview-label absolute text-[10px] font-semibold uppercase tracking-widest bg-black/70 px-2 py-1 rounded" data-preview-label>{{ (corner_labels|default({})).get(corner, 'Kort') }}</span>
