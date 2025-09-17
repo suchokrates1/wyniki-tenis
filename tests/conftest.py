@@ -1,6 +1,18 @@
+import base64
+
 import pytest
 
 from main import app, db
+
+
+@pytest.fixture
+def auth_headers(monkeypatch):
+    username = "test-user"
+    password = "test-pass"
+    monkeypatch.setenv("CONFIG_AUTH_USERNAME", username)
+    monkeypatch.setenv("CONFIG_AUTH_PASSWORD", password)
+    token = base64.b64encode(f"{username}:{password}".encode()).decode()
+    return {"Authorization": f"Basic {token}"}
 
 
 @pytest.fixture

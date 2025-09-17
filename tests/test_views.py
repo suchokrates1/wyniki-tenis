@@ -42,8 +42,8 @@ def test_overlay_all_and_non_numeric_kort(client):
     assert non_numeric_response.status_code == 404
 
 
-def test_config_page_renders(client):
-    response = client.get("/config")
+def test_config_page_renders(client, auth_headers):
+    response = client.get("/config", headers=auth_headers)
     assert response.status_code == 200
     html = response.get_data(as_text=True)
     assert "Konfiguracja Overlay" in html

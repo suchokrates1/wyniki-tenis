@@ -1,6 +1,7 @@
 import copy
 import json
 import os
+from functools import wraps
 
 from flask import Flask, render_template, request
 from flask_cors import CORS
@@ -42,6 +43,36 @@ DEFAULT_BASE_CONFIG = {
     "left_offset": -30,
     "label_position": "top-left",
 }
+
+
+def get_config_auth_credentials():
+    username = os.environ.get("CONFIG_AUTH_USERNAME")
+    password = os.environ.get("CONFIG_AUTH_PASSWORD")
+    if username is None or password is None:
+        return None
+    return username, password
+
+
+def unauthorized_response():
+    response = app.make_response(("Unauthorized", 401))
+    response.headers["WWW-Authenticate"] = 'Basic realm="Overlay Config"'
+    return response
+
+
+def requires_config_auth(view_func):
+    @wraps(view_func)
+    def wrapper(*args, **kwargs):
+        credentials = get_config_auth_credentials()
+        if not credentials:
+            return unauthorized_response()
+
+        auth = request.authorization
+        if auth and (auth.username, auth.password) == credentials:
+            return view_func(*args, **kwargs)
+
+        return unauthorized_response()
+
+    return wrapper
 
 
 class OverlayConfig(db.Model):
@@ -324,6 +355,7 @@ def overlay_all():
 
 
 @app.route("/config", methods=["GET", "POST"])
+@requires_config_auth
 def config():
     current_config = load_config()
 
