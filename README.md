@@ -25,6 +25,8 @@ Aplikacja Flask do zarządzania linkami i konfiguracją overlayów wykorzystywan
    ```bash
    cp .env.example .env
    ```
+   Aplikacja automatycznie wczyta zmienne z pliku `.env` przy starcie (najpierw z bieżącego katalogu, a następnie z katalogu projektu),
+   dzięki czemu nie ma potrzeby ręcznego eksportowania wartości.
 3. Uruchom aplikację w trybie deweloperskim poleceniem:
    ```bash
    flask run --app main.py --debug
