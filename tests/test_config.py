@@ -14,8 +14,14 @@ from main import (
 )
 
 
-def test_get_config_renders_form_and_preview(client):
-    response = client.get("/config")
+@pytest.fixture
+def authorized_client(client, auth_headers):
+    client.environ_base["HTTP_AUTHORIZATION"] = auth_headers["Authorization"]
+    return client
+
+
+def test_get_config_renders_form_and_preview(authorized_client):
+    response = authorized_client.get("/config")
 
     assert response.status_code == 200
     html = response.get_data(as_text=True)
@@ -26,7 +32,7 @@ def test_get_config_renders_form_and_preview(client):
     assert 'id="preview-stage"' in html
 
 
-def test_post_config_updates_overlay_file(client):
+def test_post_config_updates_overlay_file(authorized_client):
     payload = {
         "view_width": "720",
         "view_height": "180",
@@ -46,7 +52,7 @@ def test_post_config_updates_overlay_file(client):
         "kort_all[bottom_right][label][position]": "top-right",
     }
 
-    response = client.post("/config", data=payload, follow_redirects=True)
+    response = authorized_client.post("/config", data=payload, follow_redirects=True)
 
     assert response.status_code == 200
     html = response.get_data(as_text=True)
@@ -80,7 +86,7 @@ def test_post_config_updates_overlay_file(client):
         "display_scale": "1,25",
     }
 
-    response = client.post("/config", data=comma_payload, follow_redirects=True)
+    response = authorized_client.post("/config", data=comma_payload, follow_redirects=True)
 
     assert response.status_code == 200
 
@@ -89,13 +95,13 @@ def test_post_config_updates_overlay_file(client):
     assert written["display_scale"] == pytest.approx(1.25)
 
 
-def test_post_config_accepts_comma_decimal_values(client):
+def test_post_config_accepts_comma_decimal_values(authorized_client):
     payload = {
         "display_scale": " 1,25 ",
         "kort_all[top_left][display_scale]": " 1,35 ",
     }
 
-    response = client.post("/config", data=payload, follow_redirects=True)
+    response = authorized_client.post("/config", data=payload, follow_redirects=True)
 
     assert response.status_code == 200
 
@@ -108,14 +114,14 @@ def test_post_config_accepts_comma_decimal_values(client):
     )
 
 
-def test_config_preview_uses_comma_decimal_values_in_styles(client):
+def test_config_preview_uses_comma_decimal_values_in_styles(authorized_client):
     payload = {
         "kort_all[top_left][view_width]": "640",
         "kort_all[top_left][view_height]": "200",
         "kort_all[top_left][display_scale]": " 1,25 ",
     }
 
-    response = client.post("/config", data=payload, follow_redirects=True)
+    response = authorized_client.post("/config", data=payload, follow_redirects=True)
 
     assert response.status_code == 200
 
@@ -141,7 +147,7 @@ def test_config_preview_uses_comma_decimal_values_in_styles(client):
     assert width_px == pytest.approx(640 * 1.25)
     assert height_px == pytest.approx(200 * 1.25)
 
-    overlay_response = client.get("/kort/all")
+    overlay_response = authorized_client.get("/kort/all")
     assert overlay_response.status_code == 200
 
     overlay_soup = BeautifulSoup(overlay_response.get_data(as_text=True), "html.parser")
