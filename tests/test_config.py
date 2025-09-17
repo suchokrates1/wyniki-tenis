@@ -1,0 +1,114 @@
+import json
+from pathlib import Path
+
+import pytest
+
+from main import CONFIG_PATH, CORNERS, CORNER_POSITION_STYLES, load_config, save_config
+
+
+def test_get_config_renders_form_and_preview(client):
+    response = client.get("/config")
+
+    assert response.status_code == 200
+    html = response.get_data(as_text=True)
+
+    assert "Konfiguracja Overlay" in html
+    assert 'name="view_width"' in html
+    assert 'name="kort_all[top_left][view_width]"' in html
+    assert 'id="preview-stage"' in html
+
+
+def test_post_config_updates_overlay_file(client):
+    payload = {
+        "view_width": "720",
+        "view_height": "180",
+        "display_scale": "1.2",
+        "left_offset": "15",
+        "label_position": "bottom-right",
+        "kort_all[top_left][view_width]": "800",
+        "kort_all[top_left][view_height]": "200",
+        "kort_all[top_left][display_scale]": "1.1",
+        "kort_all[top_left][offset_x]": "45",
+        "kort_all[top_left][offset_y]": "6",
+        "kort_all[top_left][label][position]": "bottom-center",
+        "kort_all[top_left][label][offset_x]": "12",
+        "kort_all[top_left][label][offset_y]": "18",
+        "kort_all[bottom_right][view_width]": "640",
+        "kort_all[bottom_right][offset_x]": "-12",
+        "kort_all[bottom_right][label][position]": "top-right",
+    }
+
+    response = client.post("/config", data=payload, follow_redirects=True)
+
+    assert response.status_code == 200
+    html = response.get_data(as_text=True)
+    assert 'value="720"' in html
+    assert 'option value="bottom-right" selected' in html
+
+    config_path = Path(CONFIG_PATH)
+    assert config_path.exists()
+    written = json.loads(config_path.read_text())
+
+    assert written["view_width"] == 720
+    assert written["view_height"] == 180
+    assert written["display_scale"] == pytest.approx(1.2)
+    assert written["left_offset"] == 15
+    assert written["label_position"] == "bottom-right"
+
+    top_left = written["kort_all"]["top_left"]
+    assert top_left["view_width"] == 800
+    assert top_left["offset_x"] == 45
+    assert top_left["label"]["position"] == "bottom-center"
+    assert top_left["label"]["offset_x"] == 12
+    assert top_left["label"]["offset_y"] == 18
+
+    bottom_right = written["kort_all"]["bottom_right"]
+    assert bottom_right["view_width"] == 640
+    assert bottom_right["offset_x"] == -12
+    assert bottom_right["label"]["position"] == "top-right"
+
+
+def test_kort_route_uses_overlay_configuration(client):
+    config = load_config()
+    config["kort_all"]["top_left"].update(
+        {
+            "display_scale": 1.5,
+            "offset_x": 100,
+            "offset_y": 20,
+            "label": {"position": "bottom-right", "offset_x": 14, "offset_y": 10},
+        }
+    )
+    save_config(config)
+
+    response = client.get("/kort/1")
+
+    assert response.status_code == 200
+    html = response.get_data(as_text=True)
+
+    assert 'class="overlay-main"' in html
+    assert html.count('class="mini-overlay"') == 3
+    assert "Kort 2" in html and "Kort 4" in html
+    assert "transform: scale(1.5);" in html
+    assert "left: 100px;" in html
+    assert "bottom: 20px;" in html
+
+
+def test_kort_all_renders_all_courts_with_labels(client):
+    config = load_config()
+    for corner in CORNERS:
+        corner_config = config["kort_all"][corner]
+        corner_config["display_scale"] = 0.9
+        corner_config["label"]["position"] = "top-right"
+    save_config(config)
+
+    response = client.get("/kort/all")
+
+    assert response.status_code == 200
+    html = response.get_data(as_text=True)
+
+    assert html.count('class="kort-frame"') == len(CORNERS)
+    for corner in CORNERS:
+        position = CORNER_POSITION_STYLES[corner]["name"]
+        assert f'data-position="{position}"' in html
+    assert "Kort 1" in html and "Kort 4" in html
+    assert "transform: scale(0.9);" in html
