@@ -11,6 +11,8 @@ from flask_cors import CORS
 from flask_sqlalchemy import SQLAlchemy
 from dotenv import load_dotenv
 
+from results import snapshots, start_background_updater
+
 
 BASE_DIR = Path(__file__).resolve().parent
 
@@ -42,6 +44,8 @@ app.config.setdefault(
 app.config.setdefault("SQLALCHEMY_TRACK_MODIFICATIONS", False)
 
 db = SQLAlchemy(app)
+
+__all__ = ["app", "db", "snapshots"]
 
 CORNERS = ["top_left", "top_right", "bottom_left", "bottom_right"]
 
@@ -605,6 +609,9 @@ def config():
         return render_config(saved_config)
 
     return render_config(current_config)
+
+
+start_background_updater(app, overlay_links_by_kort_id)
 
 
 if __name__ == "__main__":

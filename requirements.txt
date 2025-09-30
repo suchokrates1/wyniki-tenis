@@ -2,4 +2,5 @@ flask
 flask-cors
 Flask-SQLAlchemy
 beautifulsoup4
+requests
 python-dotenv
