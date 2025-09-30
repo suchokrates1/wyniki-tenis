@@ -1,0 +1,260 @@
+<!DOCTYPE html>
+<html lang="pl">
+<head>
+  <meta charset="UTF-8">
+  <title>Wyniki meczów tenisowych</title>
+  <style>
+    :root {
+      color-scheme: dark light;
+    }
+
+    body {
+      font-family: "Inter", "Segoe UI", Tahoma, sans-serif;
+      margin: 0;
+      background: #0f172a;
+      color: #f8fafc;
+    }
+
+    main {
+      padding: 2rem 1rem 4rem;
+    }
+
+    .results-container {
+      max-width: 1080px;
+      margin: 0 auto;
+      background: rgba(15, 23, 42, 0.85);
+      border-radius: 1rem;
+      padding: 2rem;
+      box-shadow: 0 20px 45px rgba(15, 23, 42, 0.45);
+    }
+
+    h1 {
+      font-size: 2.25rem;
+      margin-bottom: 1.5rem;
+      text-align: center;
+    }
+
+    section {
+      margin-top: 2.5rem;
+    }
+
+    h2 {
+      font-size: 1.5rem;
+      margin-bottom: 1rem;
+    }
+
+    .table-wrapper {
+      overflow-x: auto;
+      border-radius: 0.75rem;
+      border: 1px solid rgba(148, 163, 184, 0.25);
+      background: rgba(30, 41, 59, 0.65);
+    }
+
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      min-width: 720px;
+    }
+
+    caption {
+      text-align: left;
+      padding: 1rem 1.5rem;
+      font-weight: 600;
+      font-size: 1rem;
+      color: #cbd5f5;
+    }
+
+    thead {
+      background: rgba(71, 85, 105, 0.45);
+    }
+
+    th,
+    td {
+      padding: 0.9rem 1.1rem;
+      border-bottom: 1px solid rgba(148, 163, 184, 0.25);
+      vertical-align: middle;
+      text-align: left;
+    }
+
+    tbody tr:nth-child(even) {
+      background: rgba(30, 41, 59, 0.45);
+    }
+
+    tbody tr:last-child td,
+    tbody tr:last-child th {
+      border-bottom: none;
+    }
+
+    .status-active {
+      color: #4ade80;
+      font-weight: 600;
+    }
+
+    .status-finished {
+      color: #facc15;
+      font-weight: 600;
+    }
+
+    .status-unavailable {
+      color: #94a3b8;
+      font-weight: 600;
+    }
+
+    .serving-indicator {
+      color: #f97316;
+      font-weight: 700;
+      margin-right: 0.35rem;
+    }
+
+    .empty-state {
+      padding: 1rem 1.5rem;
+      font-style: italic;
+      color: #cbd5f5;
+      text-align: center;
+    }
+
+    .notice {
+      background: rgba(59, 130, 246, 0.15);
+      border: 1px solid rgba(59, 130, 246, 0.35);
+      padding: 0.8rem 1rem;
+      border-radius: 0.75rem;
+      margin-bottom: 1rem;
+      color: #bfdbfe;
+    }
+
+    .summary {
+      display: flex;
+      flex-direction: column;
+      gap: 0.25rem;
+    }
+
+    @media (max-width: 768px) {
+      main {
+        padding: 1.5rem 0.5rem 3rem;
+      }
+
+      h1 {
+        font-size: 1.75rem;
+      }
+
+      table {
+        min-width: 620px;
+      }
+    }
+  </style>
+</head>
+<body>
+  <main>
+    <div class="results-container" aria-live="polite">
+      <h1>Wyniki meczów tenisowych</h1>
+
+      <section aria-labelledby="active-matches">
+        <h2 id="active-matches">Aktywne mecze</h2>
+        {% if not has_running_matches and active_matches %}
+        <p class="notice">Brak potwierdzonych aktywnych spotkań – prezentujemy ostatnio dostępne korty wraz z informacją o braku danych.</p>
+        {% elif not active_matches %}
+        <p class="notice">Brak aktywnych kortów do wyświetlenia.</p>
+        {% endif %}
+        <div class="table-wrapper">
+          <table>
+            <caption>Aktualne spotkania i status kortów</caption>
+            <thead>
+              <tr>
+                <th scope="col">Kort</th>
+                <th scope="col">Zawodnik</th>
+                <th scope="col">Sety</th>
+                <th scope="col">Gemy/Punkty</th>
+                <th scope="col">Status</th>
+                <th scope="col">Podsumowanie</th>
+              </tr>
+            </thead>
+            <tbody>
+              {% if active_matches %}
+              {% for match in active_matches %}
+              {% for player in match.players %}
+              <tr>
+                {% if loop.first %}
+                <th scope="rowgroup" rowspan="{{ match.row_span }}">{{ match.kort_label }}</th>
+                {% endif %}
+                <th scope="row">
+                  {% if player.is_serving %}<span class="serving-indicator" aria-label="Serwuje">▶</span>{% endif %}
+                  {{ player.display_name }}
+                </th>
+                <td>{{ player.display_sets }}</td>
+                <td>{{ player.display_games }}</td>
+                {% if loop.first %}
+                <td rowspan="{{ match.row_span }}" class="status-{{ match.status }}">{{ match.status_label }}</td>
+                <td rowspan="{{ match.row_span }}">
+                  <div class="summary">
+                    <span>Sety ogółem: {{ match.set_summary }}</span>
+                    <span>Stan punktów: {{ match.score_summary }}</span>
+                  </div>
+                </td>
+                {% endif %}
+              </tr>
+              {% endfor %}
+              {% endfor %}
+              {% else %}
+              <tr>
+                <td class="empty-state" colspan="6">Aktualnie brak danych o aktywnych kortach.</td>
+              </tr>
+              {% endif %}
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <section aria-labelledby="finished-matches">
+        <h2 id="finished-matches">Zakończone mecze</h2>
+        <div class="table-wrapper">
+          <table>
+            <caption>Zakończone spotkania</caption>
+            <thead>
+              <tr>
+                <th scope="col">Kort</th>
+                <th scope="col">Zawodnik</th>
+                <th scope="col">Sety</th>
+                <th scope="col">Gemy/Punkty</th>
+                <th scope="col">Status</th>
+                <th scope="col">Podsumowanie</th>
+              </tr>
+            </thead>
+            <tbody>
+              {% if finished_matches %}
+              {% for match in finished_matches %}
+              {% for player in match.players %}
+              <tr>
+                {% if loop.first %}
+                <th scope="rowgroup" rowspan="{{ match.row_span }}">{{ match.kort_label }}</th>
+                {% endif %}
+                <th scope="row">
+                  {% if player.is_serving %}<span class="serving-indicator" aria-label="Serwuje">▶</span>{% endif %}
+                  {{ player.display_name }}
+                </th>
+                <td>{{ player.display_sets }}</td>
+                <td>{{ player.display_games }}</td>
+                {% if loop.first %}
+                <td rowspan="{{ match.row_span }}" class="status-{{ match.status }}">{{ match.status_label }}</td>
+                <td rowspan="{{ match.row_span }}">
+                  <div class="summary">
+                    <span>Sety ogółem: {{ match.set_summary }}</span>
+                    <span>Stan punktów: {{ match.score_summary }}</span>
+                  </div>
+                </td>
+                {% endif %}
+              </tr>
+              {% endfor %}
+              {% endfor %}
+              {% else %}
+              <tr>
+                <td class="empty-state" colspan="6">Brak zakończonych meczów do wyświetlenia.</td>
+              </tr>
+              {% endif %}
+            </tbody>
+          </table>
+        </div>
+      </section>
+    </div>
+  </main>
+</body>
+</html>
