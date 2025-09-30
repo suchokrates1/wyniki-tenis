@@ -2,6 +2,7 @@ import copy
 import json
 import logging
 import os
+import re
 from functools import wraps
 from pathlib import Path
 from urllib.parse import urlparse
@@ -40,6 +41,7 @@ app.config.setdefault(
     os.environ.get("DATABASE_URL", "sqlite:///overlay.db"),
 )
 app.config.setdefault("SQLALCHEMY_TRACK_MODIFICATIONS", False)
+app.config.setdefault("SNAPSHOTS_DIR", BASE_DIR / "snapshots")
 
 db = SQLAlchemy(app)
 
@@ -57,6 +59,29 @@ CORNER_LABELS = {
     "top_right": "Prawy górny narożnik",
     "bottom_left": "Lewy dolny narożnik",
     "bottom_right": "Prawy dolny narożnik",
+}
+
+FINISHED_STATUSES = {
+    "finished",
+    "complete",
+    "completed",
+    "done",
+    "zakończony",
+    "zakończone",
+}
+
+ACTIVE_STATUSES = {
+    "active",
+    "in_progress",
+    "live",
+    "ongoing",
+    "running",
+}
+
+STATUS_LABELS = {
+    "active": "W trakcie",
+    "finished": "Zakończony",
+    "unavailable": "Brak danych",
 }
 
 DEFAULT_BASE_CONFIG = {
@@ -223,6 +248,224 @@ def overlay_links_by_kort_id():
     return {
         link.kort_id: {"overlay": link.overlay_url, "control": link.control_url}
         for link in get_overlay_links()
+    }
+
+
+def kort_id_sort_key(value):
+    if isinstance(value, str) and value.isdigit():
+        return (0, int(value))
+    try:
+        return (0, int(value))
+    except (TypeError, ValueError):
+        pass
+    return (1, str(value))
+
+
+def extract_kort_id(entry, fallback):
+    candidate = (
+        (entry or {}).get("kort_id")
+        or (entry or {}).get("court_id")
+        or (entry or {}).get("id")
+        or (entry or {}).get("kort")
+        or (entry or {}).get("court")
+    )
+    if candidate is None:
+        return str(fallback)
+
+    if isinstance(candidate, (int, float)):
+        return str(int(candidate))
+
+    candidate_str = str(candidate).strip()
+    digits = re.findall(r"\d+", candidate_str)
+    if digits:
+        return digits[0]
+    return candidate_str or str(fallback)
+
+
+def normalize_status(raw_status, available, has_snapshot):
+    if not has_snapshot or not available:
+        return "unavailable"
+
+    if not raw_status:
+        return "active"
+
+    status = str(raw_status).strip().lower()
+    if status in FINISHED_STATUSES:
+        return "finished"
+    if status in ACTIVE_STATUSES:
+        return "active"
+    return status or "active"
+
+
+def display_value(value, fallback="brak danych"):
+    if value is None:
+        return fallback
+    if isinstance(value, (list, dict)):
+        return fallback if not value else ", ".join(map(str, value))
+    text = str(value).strip()
+    return text if text else fallback
+
+
+def display_name(value, fallback="brak danych"):
+    if value is None:
+        return fallback
+    text = str(value).strip()
+    return text if text else fallback
+
+
+def is_player_serving(serving_marker, index, name):
+    if serving_marker is None:
+        return False
+
+    if isinstance(serving_marker, (int, float)):
+        try:
+            return int(serving_marker) == index
+        except (TypeError, ValueError):
+            return False
+
+    if isinstance(serving_marker, str):
+        marker = serving_marker.strip().lower()
+        if marker in {"player1", "p1"}:
+            return index == 0
+        if marker in {"player2", "p2"}:
+            return index == 1
+        if name:
+            return marker == str(name).strip().lower()
+        return False
+
+    if isinstance(serving_marker, dict):
+        if "index" in serving_marker:
+            try:
+                return int(serving_marker["index"]) == index
+            except (TypeError, ValueError):
+                pass
+        marker_name = serving_marker.get("name") or serving_marker.get("player")
+        if marker_name and name:
+            return str(marker_name).strip().lower() == str(name).strip().lower()
+    return False
+
+
+def normalize_players(players_data, serving_marker):
+    normalized = []
+
+    if isinstance(players_data, dict):
+        iterable = list(players_data.values())
+    elif isinstance(players_data, list):
+        iterable = players_data
+    else:
+        iterable = []
+
+    for index, raw_player in enumerate(iterable):
+        if isinstance(raw_player, dict):
+            name = raw_player.get("name") or raw_player.get("player") or raw_player.get("label")
+            sets = (
+                raw_player.get("sets")
+                or raw_player.get("set_score")
+                or raw_player.get("sets_won")
+                or raw_player.get("set")
+            )
+            games = (
+                raw_player.get("games")
+                or raw_player.get("games_won")
+                or raw_player.get("score")
+                or raw_player.get("points")
+            )
+        else:
+            name = raw_player
+            sets = None
+            games = None
+
+        normalized.append(
+            {
+                "display_name": display_name(name),
+                "display_sets": display_value(sets),
+                "display_games": display_value(games),
+                "is_serving": is_player_serving(serving_marker, index, name),
+            }
+        )
+
+    if not normalized:
+        normalized.append(
+            {
+                "display_name": "brak danych",
+                "display_sets": "brak danych",
+                "display_games": "brak danych",
+                "is_serving": False,
+            }
+        )
+
+    return normalized
+
+
+def load_snapshots():
+    directory = Path(app.config.get("SNAPSHOTS_DIR", BASE_DIR / "snapshots"))
+    if not directory.exists():
+        return {}
+
+    snapshots = {}
+    for path in sorted(directory.glob("*.json")):
+        try:
+            with path.open("r", encoding="utf-8") as handle:
+                payload = json.load(handle)
+        except (OSError, json.JSONDecodeError) as exc:
+            logger.warning("Nie udało się wczytać pliku snapshot %s: %s", path, exc)
+            continue
+
+        if isinstance(payload, dict) and isinstance(payload.get("snapshots"), list):
+            entries = payload["snapshots"]
+        elif isinstance(payload, list):
+            entries = payload
+        else:
+            entries = [payload]
+
+        for index, entry in enumerate(entries):
+            if not isinstance(entry, dict):
+                continue
+            fallback = f"{path.stem}-{index}"
+            kort_id = extract_kort_id(entry, fallback)
+            snapshots[str(kort_id)] = entry
+
+    return snapshots
+
+
+def normalize_snapshot_entry(kort_id, snapshot, link_meta=None):
+    snapshot = snapshot or {}
+    has_snapshot = bool(snapshot)
+    available = snapshot.get("available", True) if has_snapshot else False
+    status = normalize_status(snapshot.get("status"), available, has_snapshot)
+    status_label = STATUS_LABELS.get(status, status.replace("_", " ").capitalize())
+
+    kort_label = (
+        snapshot.get("court_name")
+        or snapshot.get("kort_name")
+        or snapshot.get("kort")
+        or snapshot.get("court")
+        or (link_meta or {}).get("name")
+        or (f"Kort {kort_id}" if kort_id else "Kort")
+    )
+
+    players = normalize_players(snapshot.get("players"), snapshot.get("serving"))
+    row_span = max(len(players), 1)
+
+    score_summary = display_value(
+        snapshot.get("game_score")
+        or snapshot.get("score_summary")
+        or snapshot.get("score"),
+    )
+
+    set_summary = display_value(snapshot.get("set_score") or snapshot.get("sets"))
+
+    return {
+        "kort_id": str(kort_id),
+        "kort_label": display_name(kort_label, fallback=f"Kort {kort_id}" if kort_id else "Kort"),
+        "status": status,
+        "status_label": status_label,
+        "available": available,
+        "has_snapshot": has_snapshot,
+        "players": players,
+        "row_span": row_span,
+        "score_summary": score_summary,
+        "set_summary": set_summary,
     }
 
 
@@ -503,6 +746,38 @@ def index():
         "index.html",
         links=links,
         links_management_url=links_management_url,
+    )
+
+
+@app.route("/wyniki")
+def wyniki():
+    snapshots = load_snapshots()
+    links = overlay_links_by_kort_id()
+
+    known_ids = {str(kort_id) for kort_id in links.keys()}
+    known_ids.update(str(kort_id) for kort_id in snapshots.keys())
+    sorted_ids = sorted(known_ids, key=kort_id_sort_key)
+
+    active_matches = []
+    finished_matches = []
+
+    for kort_id in sorted_ids:
+        normalized = normalize_snapshot_entry(kort_id, snapshots.get(kort_id), links.get(kort_id))
+        if normalized["status"] == "finished":
+            finished_matches.append(normalized)
+        else:
+            active_matches.append(normalized)
+
+    active_matches.sort(key=lambda match: kort_id_sort_key(match["kort_id"]))
+    finished_matches.sort(key=lambda match: kort_id_sort_key(match["kort_id"]))
+
+    has_running_matches = any(match["status"] == "active" for match in active_matches)
+
+    return render_template(
+        "wyniki.html",
+        active_matches=active_matches,
+        finished_matches=finished_matches,
+        has_running_matches=has_running_matches,
     )
 
 
