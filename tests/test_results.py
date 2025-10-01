@@ -1,9 +1,11 @@
+import copy
 import json
 import pytest
 import requests
 from requests import RequestException
 
 from main import app
+import results as results_module
 from results import (
     SNAPSHOT_STATUS_OK,
     SNAPSHOT_STATUS_UNAVAILABLE,
@@ -11,6 +13,7 @@ from results import (
     snapshots,
     update_snapshot_for_kort,
 )
+from results_state_machine import CourtPhase, STATE_INTERVALS
 
 
 # --- Fixtures -----------------------------------------------------------------
@@ -26,6 +29,7 @@ def snapshots_dir(tmp_path):
 def setup_function(function):
     # Czyścimy globalny magazyn snapshotów między testami logicznymi
     snapshots.clear()
+    results_module.court_states.clear()
 
 
 # --- Testy widoku /wyniki -----------------------------------------------------
@@ -140,6 +144,7 @@ def test_update_snapshot_for_kort_parses_players_and_serving():
     assert snapshot["players"]["A"]["sets"] == {"Set1PlayerA": "6"}
     assert snapshot["players"]["A"]["is_serving"] is True
     assert snapshot["players"]["B"]["is_serving"] is False
+    assert snapshot["archive"] == []
     assert snapshots["1"] == snapshot
     assert session.requested_urls[0][0] == "https://example.com/output/live"
 
@@ -169,3 +174,95 @@ def test_update_snapshot_marks_court_unavailable_on_parse_error(caplog):
     assert snapshot["status"] == SNAPSHOT_STATUS_UNAVAILABLE
     assert snapshot["error"]
     assert "kortu 3" in caplog.text
+
+
+def test_finished_state_archiving_and_reset(monkeypatch):
+    snapshots.clear()
+    results_module.court_states.clear()
+
+    overlay_links = {"1": {"control": "https://example.com/control/live"}}
+
+    def supplier():
+        return overlay_links
+
+    sequence = [
+        {
+            "kort_id": "1",
+            "status": SNAPSHOT_STATUS_OK,
+            "last_updated": "t0",
+            "players": {
+                "A": {"name": "Player One", "points": None, "sets": {}},
+                "B": {"name": "Player Two", "points": None, "sets": {}},
+            },
+            "raw": {},
+            "serving": None,
+            "error": None,
+        },
+        {
+            "kort_id": "1",
+            "status": SNAPSHOT_STATUS_OK,
+            "last_updated": "t1",
+            "players": {
+                "A": {"name": "Player One", "points": "", "sets": {"Set1PlayerA": "6"}},
+                "B": {"name": "Player Two", "points": "", "sets": {"Set1PlayerB": "4"}},
+            },
+            "raw": {"ScoreMatchStatus": "Finished"},
+            "serving": None,
+            "error": None,
+        },
+        {
+            "kort_id": "1",
+            "status": SNAPSHOT_STATUS_OK,
+            "last_updated": "t2",
+            "players": {
+                "A": {"name": "New Player", "points": None, "sets": {}},
+                "B": {"name": "Player Two", "points": None, "sets": {}},
+            },
+            "raw": {"ScoreMatchStatus": "Finished"},
+            "serving": None,
+            "error": None,
+        },
+    ]
+
+    call_log = []
+
+    def fake_update(kort_id, control_url, session=None):
+        call_log.append((kort_id, control_url))
+        snapshot = copy.deepcopy(sequence.pop(0))
+        entry = results_module.ensure_snapshot_entry(kort_id)
+        with results_module.snapshots_lock:
+            archive = entry.get("archive", [])
+            entry.update(snapshot)
+            entry["archive"] = archive
+            stored = copy.deepcopy(entry)
+        return stored
+
+    monkeypatch.setattr(results_module, "update_snapshot_for_kort", fake_update)
+
+    results_module._update_once(app, supplier, now=0.0)
+
+    state = results_module.court_states["1"]
+    assert state.phase == CourtPhase.PRE_START
+    assert pytest.approx(state.next_poll, rel=1e-6) == STATE_INTERVALS[CourtPhase.PRE_START]
+    assert len(call_log) == 1
+
+    results_module._update_once(app, supplier, now=state.next_poll)
+    state = results_module.court_states["1"]
+    assert state.phase == CourtPhase.FINISHED
+    archive = snapshots["1"].get("archive")
+    assert archive and len(archive) == 1
+    expected_next = state.last_polled + STATE_INTERVALS[CourtPhase.FINISHED] + state.phase_offset
+    assert pytest.approx(state.next_poll, rel=1e-6) == expected_next
+    assert len(call_log) == 2
+
+    results_module._update_once(app, supplier, now=expected_next - 1)
+    assert len(call_log) == 2
+
+    results_module._update_once(app, supplier, now=expected_next)
+    state = results_module.court_states["1"]
+    assert state.phase == CourtPhase.IDLE_NAMES
+    assert state.next_poll == expected_next
+    assert len(call_log) == 3
+    assert snapshots["1"]["players"]["A"]["name"] == "New Player"
+    assert len(snapshots["1"].get("archive") or []) == 1
+    assert not sequence
