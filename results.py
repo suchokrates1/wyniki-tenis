@@ -148,6 +148,7 @@ court_states: Dict[str, CourtState] = {}
 _throttle_lock = threading.Lock()
 _last_request_by_controlapp: Dict[str, float] = {}
 _recent_request_timestamps: Deque[float] = deque()
+_next_allowed_request_by_controlapp: Dict[str, float] = {}
 
 
 def _now_iso() -> str:
@@ -264,17 +265,24 @@ def _throttle_request(controlapp_id: str, *, current_time: Optional[float] = Non
             if last is not None:
                 wait_for_controlapp = (last + PER_CONTROLAPP_MIN_INTERVAL_SECONDS) - now_value
 
+            cooldown_until = _next_allowed_request_by_controlapp.get(controlapp_id)
+            wait_for_cooldown = 0.0
+            if cooldown_until is not None:
+                wait_for_cooldown = cooldown_until - now_value
+
             while _recent_request_timestamps and now_value - _recent_request_timestamps[0] >= GLOBAL_RATE_WINDOW_SECONDS:
                 _recent_request_timestamps.popleft()
 
             global_available = len(_recent_request_timestamps) < GLOBAL_RATE_LIMIT_PER_SECOND
 
-            if wait_for_controlapp <= 0 and global_available:
+            if wait_for_controlapp <= 0 and wait_for_cooldown <= 0 and global_available:
                 _last_request_by_controlapp[controlapp_id] = now_value
                 _recent_request_timestamps.append(now_value)
+                if cooldown_until is not None and now_value + 1e-9 >= cooldown_until:
+                    _next_allowed_request_by_controlapp.pop(controlapp_id, None)
                 return
 
-            wait_time = max(wait_for_controlapp, 0.0)
+            wait_time = max(wait_for_controlapp, wait_for_cooldown, 0.0)
             if not global_available and _recent_request_timestamps:
                 earliest = _recent_request_timestamps[0]
                 wait_time = max(wait_time, earliest + GLOBAL_RATE_WINDOW_SECONDS - now_value)
@@ -284,6 +292,25 @@ def _throttle_request(controlapp_id: str, *, current_time: Optional[float] = Non
             continue
 
         _sleep(wait_time)
+
+
+def _schedule_controlapp_resume(controlapp_id: str, allowed_from: float) -> None:
+    with _throttle_lock:
+        allowed = max(0.0, allowed_from)
+        current = _next_allowed_request_by_controlapp.get(controlapp_id)
+        if current is None or allowed > current:
+            _next_allowed_request_by_controlapp[controlapp_id] = allowed
+
+
+def _controlapp_cooldown_until(controlapp_id: str, now: float) -> Optional[float]:
+    with _throttle_lock:
+        allowed_from = _next_allowed_request_by_controlapp.get(controlapp_id)
+        if allowed_from is None:
+            return None
+        if now + 1e-9 >= allowed_from:
+            _next_allowed_request_by_controlapp.pop(controlapp_id, None)
+            return None
+        return allowed_from
 
 
 def _parse_retry_after(response: requests.Response) -> Optional[float]:
@@ -312,6 +339,42 @@ def _parse_retry_after(response: requests.Response) -> Optional[float]:
         now = datetime.now(timezone.utc)
         delta = (retry_dt - now).total_seconds()
         return max(0.0, delta)
+
+
+def _parse_rate_limit_reset(
+    response: requests.Response, *, reference_time: float
+) -> Optional[float]:
+    try:
+        header_value = response.headers.get("X-RateLimit-Reset")
+    except Exception:  # noqa: BLE001
+        return None
+
+    if not header_value:
+        return None
+
+    header_value = header_value.strip()
+    if not header_value:
+        return None
+
+    try:
+        numeric_value = float(header_value)
+    except ValueError:
+        try:
+            reset_dt = parsedate_to_datetime(header_value)
+        except (TypeError, ValueError):
+            return None
+        if reset_dt is None:
+            return None
+        if reset_dt.tzinfo is None:
+            reset_dt = reset_dt.replace(tzinfo=timezone.utc)
+        return reset_dt.timestamp()
+
+    if numeric_value > reference_time + 1.0:
+        return numeric_value
+    if numeric_value >= 0:
+        return reference_time + numeric_value
+
+    return None
 
 
 def _calculate_retry_delay(attempt: int, response: Optional[requests.Response] = None) -> float:
@@ -884,16 +947,6 @@ def _update_once(
         if not control_url:
             logger.warning("Pominięto kort %s - brak adresu control", kort_id)
             continue
-        spec_name = state.pop_due_command(current_time)
-        if not spec_name:
-            continue
-
-        command = _select_command(state, spec_name)
-        if not command:
-            state.tick_counter += 1
-            state.mark_polled(current_time)
-            continue
-
         try:
             controlapp_identifier = _extract_controlapp_identifier(control_url)
             base_url = build_output_url(control_url)
@@ -904,6 +957,27 @@ def _update_once(
             snapshot = _handle_command_error(kort_id, error=str(exc))
             _process_snapshot(state, snapshot, current_time)
             state.tick_counter += 1
+            continue
+
+        cooldown_until = _controlapp_cooldown_until(controlapp_identifier, current_time)
+        if cooldown_until is not None:
+            remaining = max(0.0, cooldown_until - current_time)
+            logger.debug(
+                "Pominięto żądanie dla kortu %s z powodu limitu (pozostało %.2f s)",
+                kort_id,
+                remaining,
+            )
+            state.tick_counter += 1
+            continue
+
+        spec_name = state.pop_due_command(current_time)
+        if not spec_name:
+            continue
+
+        command = _select_command(state, spec_name)
+        if not command:
+            state.tick_counter += 1
+            state.mark_polled(current_time)
             continue
 
         http = session or requests
@@ -971,7 +1045,52 @@ def _update_once(
                     final_snapshot = _handle_command_error(kort_id, error=diagnostics)
                     break
 
-                if status_code == 429 or status_code >= 500:
+                if status_code == 429:
+                    retry_after_header = None
+                    reset_header = None
+                    try:
+                        retry_after_header = response.headers.get("Retry-After")
+                        reset_header = response.headers.get("X-RateLimit-Reset")
+                    except Exception:  # noqa: BLE001
+                        pass
+
+                    retry_after_seconds = _parse_retry_after(response)
+                    reset_timestamp = _parse_rate_limit_reset(
+                        response, reference_time=current_time
+                    )
+                    cooldown_candidates: List[float] = []
+                    if retry_after_seconds is not None:
+                        cooldown_candidates.append(current_time + retry_after_seconds)
+                    if reset_timestamp is not None:
+                        cooldown_candidates.append(max(current_time, reset_timestamp))
+
+                    if cooldown_candidates:
+                        cooldown_until = max(cooldown_candidates)
+                    else:
+                        cooldown_until = current_time + PER_CONTROLAPP_MIN_INTERVAL_SECONDS
+
+                    _schedule_controlapp_resume(controlapp_identifier, cooldown_until)
+
+                    cooldown_seconds = max(0.0, cooldown_until - current_time)
+                    reset_iso = datetime.fromtimestamp(
+                        cooldown_until, timezone.utc
+                    ).isoformat()
+                    logger.warning(
+                        (
+                            "Serwer zwrócił 429 dla kortu %s (%s) - "
+                            "pauza %.2f s (Retry-After=%s, X-RateLimit-Reset=%s, do=%s)%s"
+                        ),
+                        kort_id,
+                        command,
+                        cooldown_seconds,
+                        retry_after_header or "brak",
+                        reset_header or "brak",
+                        reset_iso,
+                        rate_limits_desc,
+                    )
+                    break
+
+                if status_code >= 500:
                     should_retry = True
                     last_error = _format_http_error_details(command, response)
                     last_response = response
