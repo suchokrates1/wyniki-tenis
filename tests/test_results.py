@@ -8,6 +8,7 @@ from requests import RequestException
 
 from main import app
 import results as results_module
+import results_state_machine
 from results import (
     SNAPSHOT_STATUS_NO_DATA,
     SNAPSHOT_STATUS_OK,
@@ -35,6 +36,7 @@ def setup_function(function):
     results_module.court_states.clear()
     results_module._last_request_by_controlapp.clear()
     results_module._recent_request_timestamps.clear()
+    results_module._next_allowed_request_by_controlapp.clear()
 
 
 # --- Testy widoku /wyniki -----------------------------------------------------
@@ -758,7 +760,7 @@ def test_update_once_logs_successful_payload(monkeypatch, caplog):
     assert "super-secret-token" not in message
 
 
-def test_update_once_retries_after_429(monkeypatch):
+def test_update_once_respects_rate_limit_cooldown(monkeypatch):
     snapshots.clear()
     results_module.court_states.clear()
 
@@ -771,6 +773,7 @@ def test_update_once_retries_after_429(monkeypatch):
 
     retry_response = DummyResponse({"error": "too many"}, status_code=429)
     retry_response.headers["Retry-After"] = "2"
+    retry_response.headers["X-RateLimit-Reset"] = "102"
     success_payload = {
         "PlayerA": {"value": "Player One"},
         "PlayerB": {"value": "Player Two"},
@@ -784,11 +787,26 @@ def test_update_once_retries_after_429(monkeypatch):
     monkeypatch.setattr(results_module.time, "time", fake_time.time)
     monkeypatch.setattr(results_module.time, "sleep", fake_time.sleep)
     monkeypatch.setattr(results_module.random, "uniform", lambda *_: 0.0)
+    monkeypatch.setattr(results_state_machine, "_default_offset", lambda *_: 0.0)
 
     results_module._update_once(app, supplier, session=session, now=fake_time.time())
 
+    assert len(session.requests) == 1
+    cooldown = results_module._next_allowed_request_by_controlapp.get("test429")
+    assert cooldown is not None
+    assert cooldown == pytest.approx(102.0, rel=1e-6)
+    assert fake_time.sleep_calls == []
+
+    fake_time.current = 101.0
+    results_module._update_once(app, supplier, session=session, now=fake_time.time())
+
+    assert len(session.requests) == 1
+
+    fake_time.current = 103.0
+    results_module._update_once(app, supplier, session=session, now=fake_time.time())
+
     assert len(session.requests) == 2
-    assert fake_time.sleep_calls and pytest.approx(fake_time.sleep_calls[0]) == 2.0
+    assert "test429" not in results_module._next_allowed_request_by_controlapp
     snapshot = snapshots["1"]
     assert snapshot["status"] == SNAPSHOT_STATUS_OK
     assert snapshot["players"]["A"]["points"] == "15"
