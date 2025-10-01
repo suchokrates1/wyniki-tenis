@@ -39,32 +39,88 @@ CommandPlanEntry = Dict[str, Any]
 
 COMMAND_PLAN: Dict[CourtPhase, Dict[str, CommandPlanEntry]] = {
     CourtPhase.IDLE_NAMES: {
-        "GetNamePlayerA": {"command": "GetPlayerNameA"},
-        "GetNamePlayerB": {"command": "GetPlayerNameB"},
+        "GetNamePlayerA": {"commands": ("GetNamePlayerA",)},
+        "GetNamePlayerB": {"commands": ("GetNamePlayerB",)},
     },
     CourtPhase.PRE_START: {
-        "GetPoints": {"command": "GetPointsPlayer{player}", "players": ("A", "B")},
+        "GetPoints": {
+            "commands": (
+                "GetOverlayVisibility",
+                "GetMode",
+                "GetServe",
+                "GetPointsPlayer{player}",
+            ),
+            "players": ("A", "B"),
+        },
     },
     CourtPhase.LIVE_POINTS: {
-        "GetPoints": {"command": "GetPointsPlayer{player}", "players": ("A", "B")},
+        "GetPoints": {
+            "commands": (
+                "GetOverlayVisibility",
+                "GetMode",
+                "GetServe",
+                "GetPointsPlayer{player}",
+            ),
+            "players": ("A", "B"),
+        },
     },
     CourtPhase.LIVE_GAMES: {
-        "GetGames": {"command": "GetCurrentGamePlayer{player}", "players": ("A", "B")},
-        "ProbePoints": {"command": "GetPointsPlayer{player}", "players": ("A", "B")},
+        "GetGames": {
+            "commands": (
+                "GetSet",
+                "GetCurrentSetPlayer{player}",
+            ),
+            "players": ("A", "B"),
+        },
+        "ProbePoints": {
+            "commands": (
+                "GetServe",
+                "GetPointsPlayer{player}",
+            ),
+            "players": ("A", "B"),
+        },
     },
     CourtPhase.LIVE_SETS: {
-        "GetSets": {"command": "GetSetsPlayer{player}", "players": ("A", "B")},
-        "ProbeGames": {"command": "GetCurrentGamePlayer{player}", "players": ("A", "B")},
+        "GetSets": {
+            "commands": (
+                "GetSet",
+                "GetCurrentSetPlayer{player}",
+            ),
+            "players": ("A", "B"),
+        },
+        "ProbeGames": {
+            "commands": (
+                "GetServe",
+                "GetCurrentSetPlayer{player}",
+            ),
+            "players": ("A", "B"),
+        },
     },
     CourtPhase.TIEBREAK7: {
-        "GetPoints": {"command": "GetTieBreakPlayer{player}", "players": ("A", "B")},
+        "GetPoints": {
+            "commands": (
+                "GetOverlayVisibility",
+                "GetTieBreakVisibility",
+                "GetServe",
+                "GetTieBreakPlayer{player}",
+            ),
+            "players": ("A", "B"),
+        },
     },
     CourtPhase.SUPER_TB10: {
-        "GetPoints": {"command": "GetTieBreakPlayer{player}", "players": ("A", "B")},
+        "GetPoints": {
+            "commands": (
+                "GetOverlayVisibility",
+                "GetTieBreakVisibility",
+                "GetServe",
+                "GetTieBreakPlayer{player}",
+            ),
+            "players": ("A", "B"),
+        },
     },
     CourtPhase.FINISHED: {
-        "GetNamePlayerA": {"command": "GetPlayerNameA"},
-        "GetNamePlayerB": {"command": "GetPlayerNameB"},
+        "GetNamePlayerA": {"commands": ("GetNamePlayerA",)},
+        "GetNamePlayerB": {"commands": ("GetNamePlayerB",)},
     },
 }
 
@@ -222,35 +278,78 @@ def _select_command(state: CourtState, spec_name: str) -> Optional[str]:
     if not entry:
         return None
 
-    players: tuple[str, ...] = tuple(entry.get("players") or ())
-
-    if players:
-        pending = state.pending_players_by_spec.get(spec_name)
-        if pending:
-            player = pending.pop(0)
-            if pending:
-                state.pending_players_by_spec[spec_name] = pending
-                state.next_player_by_spec[spec_name] = pending[0]
-            else:
-                state.pending_players_by_spec.pop(spec_name, None)
-                if players:
-                    try:
-                        idx = players.index(player)
-                    except ValueError:
-                        idx = 0
-                    next_idx = (idx + 1) % len(players)
-                    state.next_player_by_spec[spec_name] = players[next_idx]
-            command_template: str = entry["command"]
+    pending_entries = state.pending_players_by_spec.get(spec_name)
+    if pending_entries:
+        command_template, player = pending_entries.pop(0)
+        if pending_entries:
+            state.pending_players_by_spec[spec_name] = pending_entries
+        else:
+            state.pending_players_by_spec.pop(spec_name, None)
+        if player is not None and "{player}" in command_template:
             return command_template.format(player=player)
+        return command_template
 
-        start_player = state.next_player_by_spec.get(spec_name, players[0])
-        ordered = _order_players(players, start_player)
-        if not ordered:
+    raw_commands = entry.get("commands")
+    if raw_commands is None:
+        command_template = entry.get("command")
+        if not command_template:
             return None
-        state.pending_players_by_spec[spec_name] = ordered
-        return _select_command(state, spec_name)
+        raw_commands = (command_template,)
 
-    command_template = entry["command"]
+    if isinstance(raw_commands, (str, dict)):
+        commands: List[Any] = [raw_commands]
+    else:
+        commands = list(raw_commands)
+
+    players: tuple[str, ...] = tuple(entry.get("players") or ())
+    ordered_players: List[str] = []
+    if players:
+        start_player = state.next_player_by_spec.get(spec_name, players[0])
+        ordered_players = _order_players(players, start_player)
+
+    queue: List[tuple[str, Optional[str]]] = []
+    has_player_command = False
+
+    for item in commands:
+        if isinstance(item, dict):
+            command_template = item.get("command")
+        else:
+            command_template = str(item)
+
+        if not command_template:
+            continue
+
+        if "{player}" in command_template:
+            if not ordered_players:
+                if not players:
+                    continue
+                ordered_players = _order_players(players, players[0])
+            for player in ordered_players:
+                queue.append((command_template, player))
+            has_player_command = True
+        else:
+            queue.append((command_template, None))
+
+    if not queue:
+        return None
+
+    if has_player_command and players and ordered_players:
+        last_player = ordered_players[-1]
+        try:
+            idx = players.index(last_player)
+        except ValueError:
+            idx = 0
+        next_idx = (idx + 1) % len(players)
+        state.next_player_by_spec[spec_name] = players[next_idx]
+
+    command_template, player = queue.pop(0)
+    if queue:
+        state.pending_players_by_spec[spec_name] = queue
+    else:
+        state.pending_players_by_spec.pop(spec_name, None)
+
+    if player is not None and "{player}" in command_template:
+        return command_template.format(player=player)
     return command_template
 
 

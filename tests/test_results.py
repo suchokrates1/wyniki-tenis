@@ -607,32 +607,56 @@ def test_update_once_cycles_commands_and_transitions(monkeypatch):
 
     expected_commands = {
         CourtPhase.IDLE_NAMES: {
-            "GetNamePlayerA": {"GetPlayerNameA"},
-            "GetNamePlayerB": {"GetPlayerNameB"},
+            "GetNamePlayerA": {"GetNamePlayerA"},
+            "GetNamePlayerB": {"GetNamePlayerB"},
         },
         CourtPhase.PRE_START: {
-            "GetPoints": {"GetPointsPlayerA", "GetPointsPlayerB"},
+            "GetPoints": {
+                "GetOverlayVisibility",
+                "GetMode",
+                "GetServe",
+                "GetPointsPlayerA",
+                "GetPointsPlayerB",
+            },
         },
         CourtPhase.LIVE_POINTS: {
-            "GetPoints": {"GetPointsPlayerA", "GetPointsPlayerB"},
+            "GetPoints": {
+                "GetOverlayVisibility",
+                "GetMode",
+                "GetServe",
+                "GetPointsPlayerA",
+                "GetPointsPlayerB",
+            },
         },
         CourtPhase.LIVE_GAMES: {
-            "GetGames": {"GetCurrentGamePlayerA", "GetCurrentGamePlayerB"},
-            "ProbePoints": {"GetPointsPlayerA", "GetPointsPlayerB"},
+            "GetGames": {"GetSet", "GetCurrentSetPlayerA", "GetCurrentSetPlayerB"},
+            "ProbePoints": {"GetServe", "GetPointsPlayerA", "GetPointsPlayerB"},
         },
         CourtPhase.LIVE_SETS: {
-            "GetSets": {"GetSetsPlayerA", "GetSetsPlayerB"},
-            "ProbeGames": {"GetCurrentGamePlayerA", "GetCurrentGamePlayerB"},
+            "GetSets": {"GetSet", "GetCurrentSetPlayerA", "GetCurrentSetPlayerB"},
+            "ProbeGames": {"GetServe", "GetCurrentSetPlayerA", "GetCurrentSetPlayerB"},
         },
         CourtPhase.TIEBREAK7: {
-            "GetPoints": {"GetTieBreakPlayerA", "GetTieBreakPlayerB"},
+            "GetPoints": {
+                "GetOverlayVisibility",
+                "GetTieBreakVisibility",
+                "GetServe",
+                "GetTieBreakPlayerA",
+                "GetTieBreakPlayerB",
+            },
         },
         CourtPhase.SUPER_TB10: {
-            "GetPoints": {"GetTieBreakPlayerA", "GetTieBreakPlayerB"},
+            "GetPoints": {
+                "GetOverlayVisibility",
+                "GetTieBreakVisibility",
+                "GetServe",
+                "GetTieBreakPlayerA",
+                "GetTieBreakPlayerB",
+            },
         },
         CourtPhase.FINISHED: {
-            "GetNamePlayerA": {"GetPlayerNameA"},
-            "GetNamePlayerB": {"GetPlayerNameB"},
+            "GetNamePlayerA": {"GetNamePlayerA"},
+            "GetNamePlayerB": {"GetNamePlayerB"},
         },
     }
 
@@ -649,8 +673,12 @@ def test_update_once_cycles_commands_and_transitions(monkeypatch):
         if phase in {CourtPhase.TIEBREAK7, CourtPhase.SUPER_TB10}
         and spec_name == "GetPoints"
     ]
-    assert tie_break_commands and all(
-        command.startswith("GetTieBreakPlayer") for command in tie_break_commands
+    tie_break_player_commands = [
+        command for command in tie_break_commands if command.startswith("GetTieBreakPlayer")
+    ]
+    assert tie_break_player_commands
+    assert {"GetTieBreakPlayerA", "GetTieBreakPlayerB"}.issubset(
+        set(tie_break_player_commands)
     )
 
     tb_phase_windows = [
