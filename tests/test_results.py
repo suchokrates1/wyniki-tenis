@@ -3,7 +3,6 @@ import json
 import pytest
 import requests
 from requests import RequestException
-from urllib.parse import parse_qs, urlparse
 
 from main import app
 import results as results_module
@@ -105,10 +104,17 @@ class DummyResponse:
 class DummySession:
     def __init__(self, response: DummyResponse):
         self._response = response
-        self.requested_urls = []
+        self.requests: list[dict[str, object]] = []
 
-    def get(self, url: str, timeout: int):
-        self.requested_urls.append((url, timeout))
+    def put(self, url: str, timeout: int, json: dict | None = None):
+        self.requests.append(
+            {
+                "method": "PUT",
+                "url": url,
+                "timeout": timeout,
+                "json": copy.deepcopy(json),
+            }
+        )
         return self._response
 
 
@@ -116,7 +122,7 @@ class FailingSession:
     def __init__(self, exc: Exception):
         self._exc = exc
 
-    def get(self, url: str, timeout: int):
+    def put(self, url: str, timeout: int, json: dict | None = None):
         raise self._exc
 
 
@@ -158,10 +164,14 @@ def test_update_snapshot_for_kort_parses_players_and_serving():
     assert snapshot["players"]["B"]["is_serving"] is False
     assert snapshot.get("archive") == []
     assert snapshots["1"] == snapshot
+    assert session.requests[0]["method"] == "PUT"
     assert (
-        session.requested_urls[0][0]
+        session.requests[0]["url"]
         == "https://app.overlays.uno/apiv2/controlapps/live/api"
     )
+    assert session.requests[0]["json"] == {
+        "command": results_module.FULL_SNAPSHOT_COMMAND
+    }
 
 
 def test_update_snapshot_marks_court_unavailable_on_network_error(caplog):
@@ -512,11 +522,16 @@ def test_update_once_cycles_commands_and_transitions(monkeypatch):
     assert phase_log[-1][2] >= 1
 
     issued_commands = [
-        parse_qs(urlparse(url).query).get("command", [""])[0]
-        for url, _ in session.requested_urls
+        request["json"]["command"]
+        for request in session.requests
+        if isinstance(request.get("json"), dict)
+        and "command" in request["json"]
     ]
 
-    assert issued_commands and all("command=" in url for url, _ in session.requested_urls)
+    assert session.requests and all(
+        request["method"] == "PUT" for request in session.requests
+    )
+    assert issued_commands
     assert all("GetMatchStatus" not in command for command in issued_commands)
 
     expected_commands = {
