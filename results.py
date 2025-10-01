@@ -2,6 +2,7 @@ import copy
 import json
 import logging
 import random
+import re
 import threading
 import time
 from collections import deque
@@ -44,6 +45,11 @@ FULL_SNAPSHOT_COMMAND = None
 
 
 CommandPlanEntry = Dict[str, Any]
+
+
+_PLAYER_FIELD_PATTERN = re.compile(
+    r"^(Name|Points|Set\d+|CurrentSet|TieBreak)Player([AB])$"
+)
 
 
 COMMAND_PLAN: Dict[CourtPhase, Dict[str, CommandPlanEntry]] = {
@@ -427,6 +433,29 @@ def _flatten_overlay_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
                 _walk(value)
 
     _walk(payload)
+
+    nested_updates: Dict[str, Dict[str, Any]] = {}
+    for key, value in list(flat.items()):
+        match = _PLAYER_FIELD_PATTERN.match(str(key))
+        if not match:
+            continue
+        field, suffix = match.groups()
+        player_key = f"Player{suffix}"
+        player_fields = nested_updates.setdefault(player_key, {})
+        player_fields[field] = value
+
+    for player_key, fields in nested_updates.items():
+        existing = flat.get(player_key)
+        base: Dict[str, Any]
+        if isinstance(existing, dict):
+            base = dict(existing)
+        elif existing is None:
+            base = {}
+        else:
+            base = {"Value": existing}
+        base.update(fields)
+        flat[player_key] = base
+
     return flat
 
 
@@ -435,9 +464,6 @@ def parse_overlay_json(payload: Dict[str, Any]) -> Dict[str, Any]:
         raise ValueError("Niepoprawna struktura JSON – oczekiwano obiektu")
 
     normalized = _flatten_overlay_payload(payload)
-
-    if "PlayerA" not in normalized or "PlayerB" not in normalized:
-        raise ValueError("Brak wymaganych danych graczy w źródle JSON")
 
     players = _extract_players(normalized)
     serving = _detect_server(normalized)
@@ -452,17 +478,48 @@ def parse_overlay_json(payload: Dict[str, Any]) -> Dict[str, Any]:
 def _extract_players(data: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
     players: Dict[str, Dict[str, Any]] = {}
     for suffix in ("A", "B"):
-        name_key = f"Player{suffix}"
-        player_payload: Dict[str, Any] = {
-            "name": data.get(name_key),
-            "points": data.get(f"PointsPlayer{suffix}"),
-            "sets": {
-                key: value
-                for key, value in data.items()
-                if key.startswith("Set") and key.endswith(f"Player{suffix}")
-            },
+        player_key = f"Player{suffix}"
+        nested = data.get(player_key)
+        name: Any = None
+        points: Any = None
+        sets: Dict[str, Any] = {}
+
+        if isinstance(nested, dict):
+            if "Name" in nested:
+                name = nested.get("Name")
+            elif "Value" in nested:
+                name = nested.get("Value")
+            if "Points" in nested:
+                points = nested.get("Points")
+            for key, value in nested.items():
+                if key.startswith("Set"):
+                    sets[f"{key}Player{suffix}"] = value
+                elif key == "CurrentSet":
+                    sets[f"CurrentSetPlayer{suffix}"] = value
+                elif key == "TieBreak":
+                    sets[f"TieBreakPlayer{suffix}"] = value
+
+        if name is None:
+            fallback_name = data.get(player_key)
+            if isinstance(fallback_name, dict):
+                name = fallback_name.get("Name") or fallback_name.get("Value")
+            elif fallback_name is not None:
+                name = fallback_name
+        if name is None:
+            name = data.get(f"NamePlayer{suffix}")
+
+        if points is None:
+            points = data.get(f"PointsPlayer{suffix}")
+
+        for key, value in data.items():
+            if key.startswith("Set") and key.endswith(f"Player{suffix}"):
+                sets.setdefault(key, value)
+
+        players[suffix] = {
+            "name": name,
+            "points": points,
+            "sets": sets,
         }
-        players[suffix] = player_payload
     return players
 
 
@@ -490,7 +547,17 @@ def _merge_partial_payload(kort_id: str, partial: Dict[str, Any]) -> Dict[str, A
     entry = ensure_snapshot_entry(kort_id)
     with snapshots_lock:
         raw = dict(entry.get("raw") or {})
-        raw.update(partial)
+        for key, value in partial.items():
+            if key in {"PlayerA", "PlayerB"} and isinstance(value, dict):
+                existing = raw.get(key)
+                if isinstance(existing, dict):
+                    merged = dict(existing)
+                    merged.update(value)
+                    raw[key] = merged
+                else:
+                    raw[key] = dict(value)
+            else:
+                raw[key] = value
         entry["raw"] = raw
         entry["kort_id"] = str(kort_id)
         entry.setdefault("players", {})
@@ -500,28 +567,63 @@ def _merge_partial_payload(kort_id: str, partial: Dict[str, Any]) -> Dict[str, A
         entry["last_updated"] = _now_iso()
         entry["error"] = None
 
-        if "PlayerA" in raw and "PlayerB" in raw:
-            try:
-                parsed = parse_overlay_json(raw)
-            except Exception:  # noqa: BLE001
-                snapshots[str(kort_id)] = entry
-                return copy.deepcopy(entry)
+        try:
+            parsed = parse_overlay_json(raw)
+        except Exception:  # noqa: BLE001
+            snapshots[str(kort_id)] = entry
+            return copy.deepcopy(entry)
 
-            players = parsed["players"]
-            serving = parsed["serving"]
-            entry.update(
-                {
-                    "status": SNAPSHOT_STATUS_OK,
-                    "players": {
-                        suffix: {
-                            **info,
-                            "is_serving": serving == suffix,
-                        }
-                        for suffix, info in players.items()
-                    },
-                    "serving": serving,
-                }
-            )
+        players = parsed["players"]
+        serving = parsed["serving"]
+
+        def _has_player_info(info: Any) -> bool:
+            if not isinstance(info, dict):
+                return False
+            if info.get("name") not in (None, ""):
+                return True
+            if info.get("points") is not None:
+                return True
+            sets_value = info.get("sets")
+            if isinstance(sets_value, dict) and sets_value:
+                return True
+            return False
+
+        merged_players: Dict[str, Dict[str, Any]] = copy.deepcopy(entry.get("players") or {})
+        for suffix in ("A", "B"):
+            info = players.get(suffix) or {}
+            if not _has_player_info(info):
+                continue
+            player_entry = merged_players.setdefault(suffix, {})
+            name = info.get("name")
+            if name is not None:
+                player_entry["name"] = name
+            points = info.get("points")
+            if points is not None:
+                player_entry["points"] = points
+            sets = info.get("sets") or {}
+            if sets:
+                existing_sets = dict(player_entry.get("sets") or {})
+                existing_sets.update(sets)
+                player_entry["sets"] = existing_sets
+            else:
+                player_entry.setdefault("sets", {})
+
+        for suffix in ("A", "B"):
+            player_entry = merged_players.get(suffix)
+            if player_entry is not None:
+                player_entry.setdefault("sets", {})
+                player_entry["is_serving"] = serving == suffix
+
+        entry["players"] = merged_players
+        entry["serving"] = serving
+
+        def _player_has_payload(player_raw: Any) -> bool:
+            if not isinstance(player_raw, dict):
+                return False
+            return any(value not in (None, "", {}, []) for value in player_raw.values())
+
+        if all(_player_has_payload(raw.get(f"Player{suffix}")) for suffix in ("A", "B")):
+            entry["status"] = SNAPSHOT_STATUS_OK
 
         snapshots[str(kort_id)] = entry
         snapshot = copy.deepcopy(entry)
