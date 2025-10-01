@@ -754,6 +754,46 @@ def test_update_once_retries_after_429(monkeypatch):
     assert snapshot["players"]["A"]["points"] == "15"
 
 
+def test_update_once_logs_details_on_retry_exhaustion(monkeypatch, caplog):
+    snapshots.clear()
+    results_module.court_states.clear()
+
+    overlay_links = {
+        "1": {"control": "https://app.overlays.uno/control/test500"}
+    }
+
+    def supplier():
+        return overlay_links
+
+    failing_response_1 = DummyResponse({"error": "server"}, status_code=500)
+    failing_response_2 = DummyResponse({"error": "server"}, status_code=500)
+    session = SequenceSession([failing_response_1, failing_response_2])
+
+    fake_time = TimeController(start=150.0)
+    monkeypatch.setattr(results_module.time, "time", fake_time.time)
+    monkeypatch.setattr(results_module.time, "sleep", fake_time.sleep)
+    monkeypatch.setattr(results_module.random, "uniform", lambda *_: 0.0)
+    monkeypatch.setattr(results_module, "MAX_RETRY_ATTEMPTS", 1)
+
+    caplog.set_level("WARNING", logger=results_module.logger.name)
+
+    results_module._update_once(app, supplier, session=session, now=fake_time.time())
+
+    warning_messages = [
+        record.getMessage()
+        for record in caplog.records
+        if "Wyczerpano próby" in record.getMessage()
+    ]
+    assert warning_messages, f"Brak logu wyczerpanych prób: {caplog.text}"
+    message = warning_messages[-1]
+
+    assert "kortu 1" in message
+    assert "GetNamePlayerA" in message
+    assert 'payload={"command": "GetNamePlayerA"}' in message
+    assert "po 2 próbach" in message
+    assert "HTTP 500" in message
+
+
 def test_update_once_does_not_retry_on_400(monkeypatch):
     snapshots.clear()
     results_module.court_states.clear()
