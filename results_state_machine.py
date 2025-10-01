@@ -141,8 +141,8 @@ class CommandSchedule:
 # Uwaga: nazwy komend są abstrakcyjne (mapujesz je później na konkretne API: Points A/B, Games A/B itd.)
 _COMMAND_SPECS: Dict[CourtPhase, List[CommandSpec]] = {
     CourtPhase.IDLE_NAMES: [
-        CommandSpec("GetNamePlayerA", interval=2.0, offset=0.0, initial_delay=0.0),
-        CommandSpec("GetNamePlayerB", interval=2.0, offset=1.0, initial_delay=0.0),
+        CommandSpec("GetNamePlayerA", interval=1.0, offset=0.0, initial_delay=0.0),
+        CommandSpec("GetNamePlayerB", interval=1.0, offset=1.0, initial_delay=0.0),
     ],
     CourtPhase.PRE_START: [
         CommandSpec("GetPoints", interval=2.0, initial_delay=2.0),
@@ -155,14 +155,14 @@ _COMMAND_SPECS: Dict[CourtPhase, List[CommandSpec]] = {
         CommandSpec("ProbePoints", interval=6.0, initial_delay=6.0),
     ],
     CourtPhase.TIEBREAK7: [
-        CommandSpec("GetPoints", interval=1.5, initial_delay=1.5),
+        CommandSpec("GetPoints", interval=1.0, initial_delay=1.0),
     ],
     CourtPhase.LIVE_SETS: [
         CommandSpec("GetSets", interval=8.0, initial_delay=8.0),
         CommandSpec("ProbeGames", interval=6.0, offset=3.0, initial_delay=6.0),
     ],
     CourtPhase.SUPER_TB10: [
-        CommandSpec("GetPoints", interval=1.5, initial_delay=1.5),
+        CommandSpec("GetPoints", interval=1.0, initial_delay=1.0),
     ],
     CourtPhase.FINISHED: [
         CommandSpec("GetNamePlayerA", interval=30.0, initial_delay=1.0),
