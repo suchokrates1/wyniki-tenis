@@ -6,7 +6,7 @@ import enum
 import hashlib
 import json
 from dataclasses import dataclass, field
-from typing import Dict, Optional
+from typing import Dict, List, Optional
 
 
 class CourtPhase(enum.Enum):
@@ -57,6 +57,10 @@ class CourtState:
     finished_name_signature: Optional[str] = None
     finished_raw_signature: Optional[str] = None
     phase_offset: float = field(default=None)
+    tick_counter: int = 0
+    command_index: int = 0
+    next_player: str = "A"
+    pending_players: List[str] = field(default_factory=list)
 
     def __post_init__(self) -> None:
         if self.phase_offset is None:
@@ -76,6 +80,9 @@ class CourtState:
             return
         self.phase = phase
         self.phase_started_at = now
+        self.command_index = 0
+        self.pending_players.clear()
+        self.next_player = "A"
         if phase is not CourtPhase.FINISHED:
             self.finished_name_signature = None
             self.finished_raw_signature = None
