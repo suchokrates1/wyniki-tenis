@@ -538,6 +538,20 @@ def test_update_once_cycles_commands_and_transitions(monkeypatch):
     def consecutive_diffs(times):
         return [round(b - a, 6) for a, b in zip(times, times[1:])]
 
+    idle_command_times = [time for time, _ in history if time < 30]
+    assert idle_command_times
+    assert all(diff == 1 for diff in consecutive_diffs(idle_command_times[:8]))
+
+    idle_a_times = [
+        time for time, name in history if name == "GetNamePlayerA" and time < 30
+    ]
+    idle_b_times = [
+        time for time, name in history if name == "GetNamePlayerB" and time < 30
+    ]
+    assert idle_a_times and idle_b_times
+    paired_idle = list(zip(idle_a_times, idle_b_times))
+    assert paired_idle and all(round(b - a, 6) == 1 for a, b in paired_idle)
+
     pre_start_points = [
         time for time, name in history if name == "GetPoints" and 12 <= time < 40
     ]
@@ -638,6 +652,23 @@ def test_update_once_cycles_commands_and_transitions(monkeypatch):
     assert tie_break_commands and all(
         command.startswith("GetTieBreakPlayer") for command in tie_break_commands
     )
+
+    tb_phase_windows = [
+        (90, 100),
+        (100, 110),
+    ]
+    for start, end in tb_phase_windows:
+        tb_points_times = [
+            time
+            for time, name in history
+            if name == "GetPoints" and start <= time < end
+        ]
+        assert tb_points_times
+        if len(tb_points_times) > 1:
+            diffs = consecutive_diffs(tb_points_times)
+            assert diffs
+            trailing_diffs = diffs[1:] if diffs[0] != 1 else diffs
+            assert trailing_diffs and all(diff == 1 for diff in trailing_diffs)
 
 
 def test_update_once_retries_after_429(monkeypatch):
