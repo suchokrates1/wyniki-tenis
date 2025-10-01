@@ -8,7 +8,7 @@ from urllib.parse import quote_plus, urlparse
 
 import requests
 
-from results_state_machine import CourtPhase, CourtState
+from results_state_machine import CourtPhase, CourtState, ScoreSnapshot
 
 logger = logging.getLogger(__name__)
 
@@ -326,7 +326,9 @@ def _is_truthy(value: Any) -> bool:
     }
 
 
-def _classify_phase(snapshot: Dict[str, Any], state: CourtState) -> CourtPhase:
+def _classify_phase(
+    snapshot: Dict[str, Any], state: CourtState, score: ScoreSnapshot
+) -> CourtPhase:
     if snapshot.get("status") != SNAPSHOT_STATUS_OK:
         return CourtPhase.IDLE_NAMES
 
@@ -337,43 +339,38 @@ def _classify_phase(snapshot: Dict[str, Any], state: CourtState) -> CourtPhase:
     if state.phase is CourtPhase.IDLE_NAMES and state.name_stability < 12:
         return CourtPhase.IDLE_NAMES
 
-    raw = snapshot.get("raw") or {}
-    raw_status = str(
-        raw.get("ScoreMatchStatus")
-        or raw.get("MatchStatus")
-        or raw.get("MatchState")
-        or ""
-    ).lower()
-
-    if raw_status in {"finished", "finish", "complete", "completed", "done"} or _is_truthy(
-        raw.get("MatchFinished")
+    if (
+        state.name_stability < NAME_STABILIZATION_TICKS
+        and not score.points_any
+        and not score.games_any
+        and not score.sets_present
     ):
+        return CourtPhase.IDLE_NAMES
+
+    sets_won_a, sets_won_b = score.sets_won
+    finished_sets = score.sets_completed >= 1 and (
+        max(sets_won_a, sets_won_b) >= 2 or score.sets_completed >= 3
+    )
+    if finished_sets and state.points_absent_streak >= 2:
         return CourtPhase.FINISHED
 
-    if _is_truthy(raw.get("SuperTieBreak")) or raw_status == "super_tiebreak":
+    if score.super_tb_active:
         return CourtPhase.SUPER_TB10
 
-    if _is_truthy(raw.get("TieBreak")) or raw_status == "tiebreak":
+    if score.tie_break_active:
         return CourtPhase.TIEBREAK7
 
-    if raw_status in {"live", "playing", "in_progress", "progress"}:
-        return CourtPhase.LIVE_POINTS
-
-    players = snapshot.get("players") or {}
-    points_ready = all(
-        (players.get(suffix) or {}).get("points") not in (None, "")
-        for suffix in ("A", "B")
-    )
-    if points_ready:
-        return CourtPhase.LIVE_POINTS
-
-    set_counts = [
-        len(((players.get(suffix) or {}).get("sets") or {})) for suffix in ("A", "B")
-    ]
-    if any(count >= 3 for count in set_counts):
+    if score.sets_present and score.sets_completed > 0:
         return CourtPhase.LIVE_SETS
-    if any(count > 0 for count in set_counts):
+
+    if score.games_positive:
         return CourtPhase.LIVE_GAMES
+
+    if state.points_positive_streak >= 2:
+        return CourtPhase.LIVE_POINTS
+
+    if score.points_any or score.games_any or score.sets_present:
+        return CourtPhase.PRE_START
 
     return CourtPhase.PRE_START
 
@@ -382,7 +379,9 @@ def _process_snapshot(state: CourtState, snapshot: Dict[str, Any], now: float) -
     state.mark_polled(now)
     name_signature = state.compute_name_signature(snapshot)
     state.update_name_stability(name_signature)
-    desired_phase = _classify_phase(snapshot, state)
+    score_snapshot = state.compute_score_snapshot(snapshot)
+    state.update_score_stability(score_snapshot)
+    desired_phase = _classify_phase(snapshot, state, score_snapshot)
     raw_signature = state.compute_raw_signature(snapshot)
 
     if (
