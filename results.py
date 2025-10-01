@@ -1,3 +1,4 @@
+import copy
 import logging
 import threading
 import time
@@ -6,6 +7,8 @@ from typing import Any, Callable, Dict, Optional
 from urllib.parse import urlparse
 
 import requests
+
+from results_state_machine import CourtPhase, CourtState, STATE_INTERVALS
 
 logger = logging.getLogger(__name__)
 
@@ -18,6 +21,9 @@ REQUEST_TIMEOUT_SECONDS = 5
 
 snapshots_lock = threading.Lock()
 snapshots: Dict[str, Dict[str, Any]] = {}
+
+states_lock = threading.Lock()
+court_states: Dict[str, CourtState] = {}
 
 
 def _now_iso() -> str:
@@ -53,6 +59,7 @@ def ensure_snapshot_entry(kort_id: str) -> Dict[str, Any]:
                 "raw": {},
                 "serving": None,
                 "error": None,
+                "archive": [],
             },
         )
     return entry
@@ -134,6 +141,138 @@ def _detect_server(data: Dict[str, Any]) -> Optional[str]:
     return None
 
 
+def _ensure_court_state(kort_id: str) -> CourtState:
+    with states_lock:
+        state = court_states.get(str(kort_id))
+        if state is None:
+            state = CourtState(str(kort_id))
+            court_states[str(kort_id)] = state
+        return state
+
+
+def _archive_snapshot(kort_id: str, snapshot: Dict[str, Any]) -> Dict[str, Any]:
+    archive_entry = {
+        "kort_id": snapshot.get("kort_id"),
+        "status": snapshot.get("status"),
+        "last_updated": snapshot.get("last_updated"),
+        "players": copy.deepcopy(snapshot.get("players")),
+        "serving": snapshot.get("serving"),
+        "raw": copy.deepcopy(snapshot.get("raw")),
+        "error": snapshot.get("error"),
+    }
+    entry = ensure_snapshot_entry(kort_id)
+    with snapshots_lock:
+        history = entry.setdefault("archive", [])
+        history.append(archive_entry)
+        entry["archive"] = history
+        snapshots[str(kort_id)] = entry
+    return archive_entry
+
+
+def _is_truthy(value: Any) -> bool:
+    if value is None:
+        return False
+    normalized = str(value).strip().lower()
+    return normalized in {
+        "1",
+        "true",
+        "yes",
+        "on",
+        "tak",
+        "finished",
+        "complete",
+        "completed",
+        "done",
+    }
+
+
+def _classify_phase(snapshot: Dict[str, Any], state: CourtState) -> CourtPhase:
+    if snapshot.get("status") != SNAPSHOT_STATUS_OK:
+        return CourtPhase.IDLE_NAMES
+
+    name_signature = state.compute_name_signature(snapshot)
+    if not any(part.strip() for part in name_signature.split("|")):
+        return CourtPhase.IDLE_NAMES
+
+    raw = snapshot.get("raw") or {}
+    raw_status = str(
+        raw.get("ScoreMatchStatus")
+        or raw.get("MatchStatus")
+        or raw.get("MatchState")
+        or ""
+    ).lower()
+
+    if raw_status in {"finished", "finish", "complete", "completed", "done"} or _is_truthy(
+        raw.get("MatchFinished")
+    ):
+        return CourtPhase.FINISHED
+
+    if _is_truthy(raw.get("SuperTieBreak")) or raw_status == "super_tiebreak":
+        return CourtPhase.SUPER_TB10
+
+    if _is_truthy(raw.get("TieBreak")) or raw_status == "tiebreak":
+        return CourtPhase.TIEBREAK7
+
+    players = snapshot.get("players") or {}
+    has_points = any(
+        (players.get(suffix) or {}).get("points") not in (None, "")
+        for suffix in ("A", "B")
+    )
+    if has_points:
+        return CourtPhase.LIVE_POINTS
+
+    set_counts = [
+        len(((players.get(suffix) or {}).get("sets") or {})) for suffix in ("A", "B")
+    ]
+    if any(count >= 3 for count in set_counts):
+        return CourtPhase.LIVE_SETS
+    if any(count > 0 for count in set_counts):
+        return CourtPhase.LIVE_GAMES
+
+    return CourtPhase.PRE_START
+
+
+def _process_snapshot(state: CourtState, snapshot: Dict[str, Any], now: float) -> None:
+    state.mark_polled(now)
+    desired_phase = _classify_phase(snapshot, state)
+    name_signature = state.compute_name_signature(snapshot)
+    raw_signature = state.compute_raw_signature(snapshot)
+
+    if (
+        state.phase is CourtPhase.FINISHED
+        and desired_phase is CourtPhase.FINISHED
+        and state.finished_name_signature
+        and name_signature != state.finished_name_signature
+    ):
+        state.transition(CourtPhase.IDLE_NAMES, now)
+        state.next_poll = now
+        return
+
+    if (
+        state.phase is CourtPhase.FINISHED
+        and desired_phase is CourtPhase.FINISHED
+        and state.finished_raw_signature
+        and raw_signature != state.finished_raw_signature
+    ):
+        state.transition(CourtPhase.IDLE_NAMES, now)
+        state.next_poll = now
+        return
+
+    previous_phase = state.phase
+    state.transition(desired_phase, now)
+
+    if state.phase is CourtPhase.FINISHED:
+        if previous_phase is not CourtPhase.FINISHED:
+            _archive_snapshot(state.kort_id, snapshot)
+        state.finished_name_signature = name_signature
+        state.finished_raw_signature = raw_signature
+    else:
+        state.finished_name_signature = None
+        state.finished_raw_signature = None
+
+    state.schedule_next(now)
+
+
 def update_snapshot_for_kort(
     kort_id: str,
     control_url: str,
@@ -191,8 +330,12 @@ def update_snapshot_for_kort(
         "error": None,
     }
 
+    entry = ensure_snapshot_entry(kort_id)
     with snapshots_lock:
-        snapshots[str(kort_id)] = payload
+        archive = entry.get("archive", [])
+        entry.update(payload)
+        entry["archive"] = archive
+        payload = copy.deepcopy(entry)
     return payload
 
 
@@ -206,8 +349,12 @@ def _mark_unavailable(kort_id: str, *, error: Optional[str]) -> Dict[str, Any]:
         "serving": None,
         "error": error,
     }
+    entry = ensure_snapshot_entry(kort_id)
     with snapshots_lock:
-        snapshots[str(kort_id)] = payload
+        archive = entry.get("archive", [])
+        entry.update(payload)
+        entry["archive"] = archive
+        payload = copy.deepcopy(entry)
     return payload
 
 
@@ -216,7 +363,9 @@ def _update_once(
     overlay_links_supplier: Callable[[], Dict[str, Dict[str, str]]],
     *,
     session: Optional[requests.sessions.Session] = None,
+    now: Optional[float] = None,
 ) -> None:
+    current_time = now if now is not None else time.time()
     try:
         with app.app_context():
             links = overlay_links_supplier() or {}
@@ -226,11 +375,15 @@ def _update_once(
 
     for kort_id, urls in links.items():
         ensure_snapshot_entry(kort_id)
+        state = _ensure_court_state(kort_id)
         control_url = (urls or {}).get("control")
         if not control_url:
             logger.warning("Pominięto kort %s - brak adresu control", kort_id)
             continue
-        update_snapshot_for_kort(kort_id, control_url, session=session)
+        if state.next_poll and current_time < state.next_poll:
+            continue
+        snapshot = update_snapshot_for_kort(kort_id, control_url, session=session)
+        _process_snapshot(state, snapshot, current_time)
 
 
 _thread: Optional[threading.Thread] = None
@@ -257,6 +410,7 @@ def start_background_updater(
             links = overlay_links_supplier() or {}
         for kort_id in links:
             ensure_snapshot_entry(kort_id)
+            _ensure_court_state(kort_id)
     except Exception as exc:  # noqa: BLE001
         logger.warning(
             "Nie udało się wstępnie zainicjować snapshotów kortów: %s", exc
