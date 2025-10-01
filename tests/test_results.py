@@ -1,5 +1,6 @@
 import copy
 import json
+import logging
 
 import pytest
 import requests
@@ -198,6 +199,45 @@ def test_update_snapshot_for_kort_initializes_entry_without_requests():
     assert snapshot["players"] == {}
     assert snapshot["raw"] == {}
     assert snapshot["serving"] is None
+
+
+def test_update_once_logs_rate_limit_headers(caplog, snapshots_dir):
+    _ = snapshots_dir
+    caplog.set_level(logging.DEBUG, logger=results_module.logger.name)
+
+    response = DummyResponse(
+        {
+            "PlayerA": {"Name": "Test A"},
+            "PlayerB": {"Name": "Test B"},
+        }
+    )
+    response.headers = {
+        "X-RateLimit-Remaining": "5",
+        "X-RateLimit-Limit": "10",
+        "X-RateLimit-Reset": "170000",
+        "Retry-After": "2",
+    }
+    session = DummySession(response)
+
+    control_url = "https://app.overlays.uno/control/abc123"
+
+    results_module._update_once(
+        app,
+        lambda: {"kort-1": {"control": control_url}},
+        session=session,
+        now=10.0,
+    )
+
+    log_messages = [
+        record.getMessage()
+        for record in caplog.records
+        if record.name == results_module.logger.name
+    ]
+
+    assert any(
+        "limity: remaining=5, limit=10, reset=170000, retry_after=2" in message
+        for message in log_messages
+    )
 
 
 def test_merge_partial_payload_maps_single_player_fields():

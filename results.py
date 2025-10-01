@@ -193,6 +193,37 @@ def _format_payload_for_logging(payload: Any, *, max_length: int = 512) -> str:
     return _shorten_for_logging(text, max_length=max_length)
 
 
+def _format_rate_limit_headers(response: Optional[requests.Response]) -> str:
+    if response is None:
+        return ""
+
+    headers = getattr(response, "headers", None)
+    if not headers:
+        return ""
+
+    header_mapping = (
+        ("X-RateLimit-Remaining", "remaining"),
+        ("X-RateLimit-Limit", "limit"),
+        ("X-RateLimit-Reset", "reset"),
+        ("Retry-After", "retry_after"),
+    )
+
+    parts: List[str] = []
+    for header_name, label in header_mapping:
+        value = headers.get(header_name)
+        if value is None:
+            continue
+        text = str(value).strip()
+        if not text:
+            continue
+        parts.append(f"{label}={text}")
+
+    if not parts:
+        return ""
+
+    return f" (limity: {', '.join(parts)})"
+
+
 def _extract_controlapp_identifier(control_url: str) -> str:
     parsed = urlparse(control_url)
     segments = [segment for segment in parsed.path.split("/") if segment]
@@ -892,11 +923,13 @@ def _update_once(
                     json=payload,
                     timeout=REQUEST_TIMEOUT_SECONDS,
                 )
+                rate_limits_desc = _format_rate_limit_headers(response)
                 logger.debug(
-                    "Żądanie %s %s zakończone statusem %s",
+                    "Żądanie %s %s zakończone statusem %s%s",
                     "PUT",
                     response.url,
                     response.status_code,
+                    rate_limits_desc,
                 )
             except requests.Timeout as exc:
                 should_retry = True
@@ -957,10 +990,11 @@ def _update_once(
                         break
 
                     logger.debug(
-                        "Odpowiedź komendy %s dla kortu %s: %s",
+                        "Odpowiedź komendy %s dla kortu %s: %s%s",
                         command,
                         kort_id,
                         _format_payload_for_logging(payload),
+                        rate_limits_desc,
                     )
                     flattened = _flatten_overlay_payload(payload)
                     final_snapshot = _merge_partial_payload(kort_id, flattened)
