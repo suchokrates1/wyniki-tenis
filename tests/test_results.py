@@ -32,6 +32,8 @@ def setup_function(function):
     # Czyścimy globalny magazyn snapshotów między testami logicznymi
     snapshots.clear()
     results_module.court_states.clear()
+    results_module._last_request_by_controlapp.clear()
+    results_module._recent_request_timestamps.clear()
 
 
 # --- Testy widoku /wyniki -----------------------------------------------------
@@ -141,6 +143,43 @@ class FailingSession:
 
     def get(self, url: str, timeout: int, params: dict | None = None):
         raise self._exc
+
+
+class SequenceSession:
+    def __init__(self, responses: list[DummyResponse]):
+        self._responses = list(responses)
+        self.requests: list[dict[str, object]] = []
+
+    def get(self, url: str, timeout: int, params: dict | None = None):
+        if not self._responses:
+            raise AssertionError("No more responses configured")
+        response = self._responses.pop(0)
+        query = urlencode(params or {}, doseq=True)
+        final_url = f"{url}?{query}" if query else url
+        self.requests.append(
+            {
+                "method": "GET",
+                "url": url,
+                "timeout": timeout,
+                "params": copy.deepcopy(params),
+                "full_url": final_url,
+            }
+        )
+        response.url = final_url
+        return response
+
+
+class TimeController:
+    def __init__(self, start: float = 0.0):
+        self.current = start
+        self.sleep_calls: list[float] = []
+
+    def time(self) -> float:
+        return self.current
+
+    def sleep(self, duration: float) -> None:
+        self.sleep_calls.append(duration)
+        self.current += duration
 
 
 # --- Testy logiki parsera/snapshotów -----------------------------------------
@@ -599,6 +638,70 @@ def test_update_once_cycles_commands_and_transitions(monkeypatch):
     assert tie_break_commands and all(
         command.startswith("GetTieBreakPlayer") for command in tie_break_commands
     )
+
+
+def test_update_once_retries_after_429(monkeypatch):
+    snapshots.clear()
+    results_module.court_states.clear()
+
+    overlay_links = {
+        "1": {"control": "https://app.overlays.uno/control/test429"}
+    }
+
+    def supplier():
+        return overlay_links
+
+    retry_response = DummyResponse({"error": "too many"}, status_code=429)
+    retry_response.headers["Retry-After"] = "2"
+    success_payload = {
+        "PlayerA": {"value": "Player One"},
+        "PlayerB": {"value": "Player Two"},
+        "PointsPlayerA": {"value": "15"},
+        "PointsPlayerB": {"value": "30"},
+    }
+    success_response = DummyResponse(success_payload, status_code=200)
+    session = SequenceSession([retry_response, success_response])
+
+    fake_time = TimeController(start=100.0)
+    monkeypatch.setattr(results_module.time, "time", fake_time.time)
+    monkeypatch.setattr(results_module.time, "sleep", fake_time.sleep)
+    monkeypatch.setattr(results_module.random, "uniform", lambda *_: 0.0)
+
+    results_module._update_once(app, supplier, session=session, now=fake_time.time())
+
+    assert len(session.requests) == 2
+    assert fake_time.sleep_calls and pytest.approx(fake_time.sleep_calls[0]) == 2.0
+    snapshot = snapshots["1"]
+    assert snapshot["status"] == SNAPSHOT_STATUS_OK
+    assert snapshot["players"]["A"]["points"] == "15"
+
+
+def test_update_once_does_not_retry_on_400(monkeypatch):
+    snapshots.clear()
+    results_module.court_states.clear()
+
+    overlay_links = {
+        "1": {"control": "https://app.overlays.uno/control/test400"}
+    }
+
+    def supplier():
+        return overlay_links
+
+    error_response = DummyResponse({"error": "bad request"}, status_code=400)
+    session = SequenceSession([error_response])
+
+    fake_time = TimeController(start=50.0)
+    monkeypatch.setattr(results_module.time, "time", fake_time.time)
+    monkeypatch.setattr(results_module.time, "sleep", fake_time.sleep)
+    monkeypatch.setattr(results_module.random, "uniform", lambda *_: 0.0)
+
+    results_module._update_once(app, supplier, session=session, now=fake_time.time())
+
+    assert len(session.requests) == 1
+    assert fake_time.sleep_calls == []
+    snapshot = snapshots["1"]
+    assert snapshot["status"] == SNAPSHOT_STATUS_UNAVAILABLE
+    assert "HTTP 400" in snapshot["error"]
 
 
 def test_update_snapshot_marks_court_unavailable_on_json_decode_error(caplog):
