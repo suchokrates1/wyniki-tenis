@@ -200,7 +200,8 @@ def test_update_once_cycles_commands_and_transitions(monkeypatch):
     def supplier():
         return overlay_links
 
-    # Scenariusz czasowy: IDLE (0-29s) -> LIVE (30-59s) -> FINISHED (60-119s) -> reset nazwisk (>=120s)
+    # Scenariusz czasowy: IDLE (0-29s) -> PRE_START (30-49s) -> LIVE_GAMES (50-79s)
+    # -> TIEBREAK (80-99s) -> SUPER_TB (100-119s) -> FINISHED (120-159s) -> reset nazwisk (>=160s)
     idle_snapshot = {
         "kort_id": "1",
         "status": SNAPSHOT_STATUS_OK,
@@ -213,15 +214,51 @@ def test_update_once_cycles_commands_and_transitions(monkeypatch):
         "serving": None,
         "error": None,
     }
-    live_snapshot = {
+    pre_start_snapshot = {
         "kort_id": "1",
         "status": SNAPSHOT_STATUS_OK,
-        "last_updated": "live",
+        "last_updated": "pre",
         "players": {
-                "A": {"name": "Player One", "points": "", "sets": {"Set1PlayerA": "6"}},
-                "B": {"name": "Player Two", "points": "", "sets": {"Set1PlayerB": "4"}},
+            "A": {"name": "Player One", "points": None, "sets": {}},
+            "B": {"name": "Player Two", "points": None, "sets": {}},
         },
-        "raw": {"ScoreMatchStatus": "Live"},
+        "raw": {"ScoreMatchStatus": "Warmup"},
+        "serving": None,
+        "error": None,
+    }
+    live_games_snapshot = {
+        "kort_id": "1",
+        "status": SNAPSHOT_STATUS_OK,
+        "last_updated": "games",
+        "players": {
+            "A": {"name": "Player One", "points": "", "sets": {"Set1PlayerA": "6"}},
+            "B": {"name": "Player Two", "points": "", "sets": {"Set1PlayerB": "4"}},
+        },
+        "raw": {"ScoreMatchStatus": ""},
+        "serving": None,
+        "error": None,
+    }
+    tiebreak_snapshot = {
+        "kort_id": "1",
+        "status": SNAPSHOT_STATUS_OK,
+        "last_updated": "tb",
+        "players": {
+            "A": {"name": "Player One", "points": None, "sets": {"Set1PlayerA": "6"}},
+            "B": {"name": "Player Two", "points": None, "sets": {"Set1PlayerB": "6"}},
+        },
+        "raw": {"TieBreak": "true"},
+        "serving": None,
+        "error": None,
+    }
+    super_tb_snapshot = {
+        "kort_id": "1",
+        "status": SNAPSHOT_STATUS_OK,
+        "last_updated": "stb",
+        "players": {
+            "A": {"name": "Player One", "points": None, "sets": {"Set1PlayerA": "6"}},
+            "B": {"name": "Player Two", "points": None, "sets": {"Set1PlayerB": "6"}},
+        },
+        "raw": {"SuperTieBreak": "1"},
         "serving": None,
         "error": None,
     }
@@ -252,13 +289,19 @@ def test_update_once_cycles_commands_and_transitions(monkeypatch):
 
     current_time = {"value": 0.0}
 
-    def fake_update(kort_id, control_url, session=None):
+    def fake_merge(kort_id, partial):
         tick = current_time["value"]
         if tick < 30:
             template = idle_snapshot
-        elif tick < 60:
-            template = live_snapshot
+        elif tick < 50:
+            template = pre_start_snapshot
+        elif tick < 80:
+            template = live_games_snapshot
+        elif tick < 100:
+            template = tiebreak_snapshot
         elif tick < 120:
+            template = super_tb_snapshot
+        elif tick < 160:
             template = finished_snapshot
         else:
             template = reset_snapshot
@@ -271,13 +314,28 @@ def test_update_once_cycles_commands_and_transitions(monkeypatch):
             stored = copy.deepcopy(entry)
         return stored
 
-    monkeypatch.setattr(results_module, "update_snapshot_for_kort", fake_update)
+    phase_command_log: list[tuple[CourtPhase, str, str]] = []
+
+    original_select = results_module._select_command
+
+    def logging_select(state, spec_name):
+        command = original_select(state, spec_name)
+        if command:
+            phase_command_log.append((state.phase, spec_name, command))
+        return command
+
+    session = DummySession(DummyResponse({}))
+
+    monkeypatch.setattr(results_module, "_merge_partial_payload", fake_merge)
+    monkeypatch.setattr(results_module, "_select_command", logging_select)
 
     phase_log = []
-    total_ticks = 140
+    total_ticks = 180
     for tick in range(total_ticks):
         current_time["value"] = float(tick)
-        results_module._update_once(app, supplier, now=current_time["value"])
+        results_module._update_once(
+            app, supplier, now=current_time["value"], session=session
+        )
         state = results_module.court_states["1"]
         phase_log.append((tick, state.phase, state.name_stability))
 
@@ -286,53 +344,54 @@ def test_update_once_cycles_commands_and_transitions(monkeypatch):
     assert archive and len(archive) >= 1
     assert archive[0]["players"]["A"]["name"] == "Player One"
     assert snapshots["1"]["players"]["A"]["name"] == "New Player"
-    assert any(phase == CourtPhase.IDLE_NAMES for tick, phase, _ in phase_log if tick >= 120)
-    assert state.phase == CourtPhase.FINISHED
+    assert any(phase == CourtPhase.IDLE_NAMES for tick, phase, _ in phase_log if tick >= 160)
+    assert state.phase in {CourtPhase.FINISHED, CourtPhase.IDLE_NAMES}
 
     first_non_idle_tick = next(
         (tick for tick, phase, _ in phase_log if phase is not CourtPhase.IDLE_NAMES),
         None,
     )
     assert first_non_idle_tick is None or first_non_idle_tick >= 11
-    assert any(phase == CourtPhase.PRE_START for tick, phase, _ in phase_log if 12 <= tick < 30)
-    assert any(phase == CourtPhase.LIVE_GAMES for tick, phase, _ in phase_log if 30 <= tick < 60)
-    assert any(phase == CourtPhase.FINISHED for tick, phase, _ in phase_log if 60 <= tick < 120)
+    assert any(phase == CourtPhase.PRE_START for tick, phase, _ in phase_log if 12 <= tick < 50)
+    assert any(phase == CourtPhase.LIVE_GAMES for tick, phase, _ in phase_log if 50 <= tick < 80)
+    assert any(phase == CourtPhase.TIEBREAK7 for tick, phase, _ in phase_log if 80 <= tick < 100)
+    assert any(phase == CourtPhase.SUPER_TB10 for tick, phase, _ in phase_log if 100 <= tick < 120)
+    assert any(phase == CourtPhase.FINISHED for tick, phase, _ in phase_log if 120 <= tick < 160)
     idle_stability = [stability for tick, phase, stability in phase_log if tick < 30]
     assert idle_stability and max(idle_stability) >= 12
 
     history = state.command_history
     early_names = [name for time, name in history if time < 6]
-    assert early_names == [
-        "GetNamePlayerA",
-        "GetNamePlayerB",
+    assert early_names[:4] == [
         "GetNamePlayerA",
         "GetNamePlayerB",
         "GetNamePlayerA",
         "GetNamePlayerB",
     ]
+    assert set(early_names).issubset({"GetNamePlayerA", "GetNamePlayerB"})
 
     def consecutive_diffs(times):
         return [round(b - a, 6) for a, b in zip(times, times[1:])]
 
-    points_times = [time for time, name in history if name == "GetPoints" and 12 <= time < 30]
+    points_times = [time for time, name in history if name == "GetPoints" and 12 <= time < 50]
     assert points_times
     assert all(diff == 2 for diff in consecutive_diffs(points_times))
 
-    games_times = [time for time, name in history if name == "GetGames" and 30 <= time < 60]
+    games_times = [time for time, name in history if name == "GetGames" and 50 <= time < 80]
     assert games_times
     assert all(diff in {4, 5} for diff in consecutive_diffs(games_times))
 
     probe_points_times = [
-        time for time, name in history if name == "ProbePoints" and 30 <= time < 60
+        time for time, name in history if name == "ProbePoints" and 50 <= time < 80
     ]
     assert probe_points_times
     assert all(diff in {6} for diff in consecutive_diffs(probe_points_times))
 
     finished_a_times = [
-        time for time, name in history if name == "GetNamePlayerA" and 60 <= time < 120
+        time for time, name in history if name == "GetNamePlayerA" and 120 <= time < 160
     ]
     finished_b_times = [
-        time for time, name in history if name == "GetNamePlayerB" and 60 <= time < 120
+        time for time, name in history if name == "GetNamePlayerB" and 120 <= time < 160
     ]
     assert finished_a_times and finished_b_times
     assert all(diff == 30 for diff in consecutive_diffs(finished_a_times))
@@ -343,6 +402,55 @@ def test_update_once_cycles_commands_and_transitions(monkeypatch):
         assert b_time - preceding_a == 15
 
     assert phase_log[-1][2] >= 1
+
+    issued_commands = [
+        parse_qs(urlparse(url).query).get("command", [""])[0]
+        for url, _ in session.requested_urls
+    ]
+
+    assert issued_commands and all("command=" in url for url, _ in session.requested_urls)
+    assert all("GetMatchStatus" not in command for command in issued_commands)
+
+    expected_commands = {
+        CourtPhase.IDLE_NAMES: {
+            "GetNamePlayerA": {"GetPlayerNameA"},
+            "GetNamePlayerB": {"GetPlayerNameB"},
+        },
+        CourtPhase.PRE_START: {
+            "GetPoints": {"GetPointsPlayerA", "GetPointsPlayerB"},
+        },
+        CourtPhase.LIVE_GAMES: {
+            "GetGames": {"GetCurrentGamePlayerA", "GetCurrentGamePlayerB"},
+            "ProbePoints": {"GetPointsPlayerA", "GetPointsPlayerB"},
+        },
+        CourtPhase.TIEBREAK7: {
+            "GetPoints": {"GetTieBreakPlayerA", "GetTieBreakPlayerB"},
+        },
+        CourtPhase.SUPER_TB10: {
+            "GetPoints": {"GetTieBreakPlayerA", "GetTieBreakPlayerB"},
+        },
+        CourtPhase.FINISHED: {
+            "GetNamePlayerA": {"GetPlayerNameA"},
+            "GetNamePlayerB": {"GetPlayerNameB"},
+        },
+    }
+
+    assert phase_command_log
+    for phase, spec_name, command in phase_command_log:
+        expected_for_phase = expected_commands.get(phase)
+        if not expected_for_phase or spec_name not in expected_for_phase:
+            continue
+        assert command in expected_for_phase[spec_name]
+
+    tie_break_commands = [
+        command
+        for phase, spec_name, command in phase_command_log
+        if phase in {CourtPhase.TIEBREAK7, CourtPhase.SUPER_TB10}
+        and spec_name == "GetPoints"
+    ]
+    assert tie_break_commands and all(
+        command.startswith("GetTieBreakPlayer") for command in tie_break_commands
+    )
 
 
 def test_update_snapshot_marks_court_unavailable_on_json_decode_error(caplog):

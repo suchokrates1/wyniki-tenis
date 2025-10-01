@@ -121,9 +121,8 @@ class CourtState:
 
     # --- pola z gałęzi "main" (rotacja A/B itp.)
     tick_counter: int = 0
-    command_index: int = 0
-    next_player: str = "A"
-    pending_players: List[str] = field(default_factory=list)
+    next_player_by_spec: Dict[str, str] = field(default_factory=dict)
+    pending_players_by_spec: Dict[str, List[str]] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         if self.phase_offset is None:
@@ -147,9 +146,8 @@ class CourtState:
         self.phase = phase
         self.phase_started_at = now
         # reset pomocniczych liczników/rotacji
-        self.command_index = 0
-        self.pending_players.clear()
-        self.next_player = "A"
+        self.pending_players_by_spec.clear()
+        self.next_player_by_spec.clear()
         # wyczyść sygnatury tylko jeśli nie wchodzimy w FINISHED
         if phase is not CourtPhase.FINISHED:
             self.finished_name_signature = None
