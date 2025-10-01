@@ -880,6 +880,7 @@ def _update_once(
         attempt = 0
         final_snapshot: Optional[Dict[str, Any]] = None
         last_error: Optional[str] = None
+        last_response: Optional[requests.Response] = None
 
         while True:
             response: Optional[requests.Response] = None
@@ -900,6 +901,7 @@ def _update_once(
             except requests.Timeout as exc:
                 should_retry = True
                 last_error = str(exc)
+                last_response = None
             except Exception as exc:  # noqa: BLE001
                 logger.warning(
                     "Nie udało się pobrać komendy %s dla kortu %s: %s",
@@ -939,6 +941,7 @@ def _update_once(
                 if status_code == 429 or status_code >= 500:
                     should_retry = True
                     last_error = _format_http_error_details(command, response)
+                    last_response = response
                 else:
                     try:
                         response.raise_for_status()
@@ -965,13 +968,27 @@ def _update_once(
 
             if should_retry:
                 if attempt >= MAX_RETRY_ATTEMPTS:
+                    payload_summary = _format_payload_for_logging(payload)
+                    diagnostics = last_error
+                    if not diagnostics and last_response is not None:
+                        diagnostics = _format_http_error_details(command, last_response)
+                    if not diagnostics:
+                        diagnostics = "brak dodatkowych informacji"
+                    diagnostics = _shorten_for_logging(str(diagnostics))
+                    attempt_count = attempt + 1
                     logger.warning(
-                        "Wyczerpano próby pobierania komendy %s dla kortu %s po %s próbach",
+                        (
+                            "Wyczerpano próby pobierania komendy %s "
+                            "dla kortu %s po %s próbach "
+                            "(payload=%s, ostatnia_odpowiedź=%s)"
+                        ),
                         command,
                         kort_id,
-                        attempt + 1,
+                        attempt_count,
+                        payload_summary,
+                        diagnostics,
                     )
-                    error_message = last_error or "Nie udało się pobrać danych kortu"
+                    error_message = last_error or diagnostics or "Nie udało się pobrać danych kortu"
                     final_snapshot = _handle_command_error(kort_id, error=error_message)
                     break
 
