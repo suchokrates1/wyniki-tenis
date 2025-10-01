@@ -13,7 +13,7 @@ from results import (
     snapshots,
     update_snapshot_for_kort,
 )
-from results_state_machine import CourtPhase, STATE_INTERVALS
+from results_state_machine import CourtPhase
 
 
 # --- Fixtures -----------------------------------------------------------------
@@ -199,50 +199,76 @@ def test_finished_state_archiving_and_reset(monkeypatch):
     def supplier():
         return overlay_links
 
-    sequence = [
-        {
-            "kort_id": "1",
-            "status": SNAPSHOT_STATUS_OK,
-            "last_updated": "t0",
-            "players": {
-                "A": {"name": "Player One", "points": None, "sets": {}},
-                "B": {"name": "Player Two", "points": None, "sets": {}},
-            },
-            "raw": {},
-            "serving": None,
-            "error": None,
+    idle_snapshot = {
+        "kort_id": "1",
+        "status": SNAPSHOT_STATUS_OK,
+        "last_updated": "idle",
+        "players": {
+            "A": {"name": "Player One", "points": None, "sets": {}},
+            "B": {"name": "Player Two", "points": None, "sets": {}},
         },
-        {
-            "kort_id": "1",
-            "status": SNAPSHOT_STATUS_OK,
-            "last_updated": "t1",
-            "players": {
-                "A": {"name": "Player One", "points": "", "sets": {"Set1PlayerA": "6"}},
-                "B": {"name": "Player Two", "points": "", "sets": {"Set1PlayerB": "4"}},
+        "raw": {"ScoreMatchStatus": "Idle"},
+        "serving": None,
+        "error": None,
+    }
+    live_snapshot = {
+        "kort_id": "1",
+        "status": SNAPSHOT_STATUS_OK,
+        "last_updated": "live",
+        "players": {
+            "A": {
+                "name": "Player One",
+                "points": "",
+                "sets": {"Set1PlayerA": "6"},
             },
-            "raw": {"ScoreMatchStatus": "Finished"},
-            "serving": None,
-            "error": None,
-        },
-        {
-            "kort_id": "1",
-            "status": SNAPSHOT_STATUS_OK,
-            "last_updated": "t2",
-            "players": {
-                "A": {"name": "New Player", "points": None, "sets": {}},
-                "B": {"name": "Player Two", "points": None, "sets": {}},
+            "B": {
+                "name": "Player Two",
+                "points": "",
+                "sets": {"Set1PlayerB": "4"},
             },
-            "raw": {"ScoreMatchStatus": "Finished"},
-            "serving": None,
-            "error": None,
         },
-    ]
+        "raw": {"ScoreMatchStatus": "Live"},
+        "serving": None,
+        "error": None,
+    }
+    finished_snapshot = {
+        "kort_id": "1",
+        "status": SNAPSHOT_STATUS_OK,
+        "last_updated": "fin",
+        "players": {
+            "A": {"name": "Player One", "points": "", "sets": {"Set1PlayerA": "6"}},
+            "B": {"name": "Player Two", "points": "", "sets": {"Set1PlayerB": "4"}},
+        },
+        "raw": {"ScoreMatchStatus": "Finished"},
+        "serving": None,
+        "error": None,
+    }
+    reset_snapshot = {
+        "kort_id": "1",
+        "status": SNAPSHOT_STATUS_OK,
+        "last_updated": "reset",
+        "players": {
+            "A": {"name": "New Player", "points": None, "sets": {}},
+            "B": {"name": "Player Two", "points": None, "sets": {}},
+        },
+        "raw": {"ScoreMatchStatus": "Finished"},
+        "serving": None,
+        "error": None,
+    }
 
-    call_log = []
+    current_time = {"value": 0.0}
 
     def fake_update(kort_id, control_url, session=None):
-        call_log.append((kort_id, control_url))
-        snapshot = copy.deepcopy(sequence.pop(0))
+        tick = current_time["value"]
+        if tick < 30:
+            template = idle_snapshot
+        elif tick < 60:
+            template = live_snapshot
+        elif tick < 120:
+            template = finished_snapshot
+        else:
+            template = reset_snapshot
+        snapshot = copy.deepcopy(template)
         entry = results_module.ensure_snapshot_entry(kort_id)
         with results_module.snapshots_lock:
             archive = entry.get("archive", [])
@@ -253,33 +279,76 @@ def test_finished_state_archiving_and_reset(monkeypatch):
 
     monkeypatch.setattr(results_module, "update_snapshot_for_kort", fake_update)
 
-    results_module._update_once(app, supplier, now=0.0)
+    phase_log = []
+    total_ticks = 140
+    for tick in range(total_ticks):
+        current_time["value"] = float(tick)
+        results_module._update_once(app, supplier, now=current_time["value"])
+        state = results_module.court_states["1"]
+        phase_log.append((tick, state.phase, state.name_stability))
 
     state = results_module.court_states["1"]
-    assert state.phase == CourtPhase.PRE_START
-    assert pytest.approx(state.next_poll, rel=1e-6) == STATE_INTERVALS[CourtPhase.PRE_START]
-    assert len(call_log) == 1
-
-    results_module._update_once(app, supplier, now=state.next_poll)
-    state = results_module.court_states["1"]
-    assert state.phase == CourtPhase.FINISHED
     archive = snapshots["1"].get("archive")
-    assert archive and len(archive) == 1
-    expected_next = state.last_polled + STATE_INTERVALS[CourtPhase.FINISHED] + state.phase_offset
-    assert pytest.approx(state.next_poll, rel=1e-6) == expected_next
-    assert len(call_log) == 2
-
-    results_module._update_once(app, supplier, now=expected_next - 1)
-    assert len(call_log) == 2
-
-    results_module._update_once(app, supplier, now=expected_next)
-    state = results_module.court_states["1"]
-    assert state.phase == CourtPhase.IDLE_NAMES
-    assert state.next_poll == expected_next
-    assert len(call_log) == 3
+    assert archive and len(archive) >= 1
+    assert archive[0]["players"]["A"]["name"] == "Player One"
     assert snapshots["1"]["players"]["A"]["name"] == "New Player"
-    assert len(snapshots["1"].get("archive") or []) == 1
-    assert not sequence
+    assert any(phase == CourtPhase.IDLE_NAMES for tick, phase, _ in phase_log if tick >= 120)
+    assert state.phase == CourtPhase.FINISHED
+
+    first_non_idle_tick = next(
+        (tick for tick, phase, _ in phase_log if phase is not CourtPhase.IDLE_NAMES),
+        None,
+    )
+    assert first_non_idle_tick is None or first_non_idle_tick >= 11
+    assert any(phase == CourtPhase.PRE_START for tick, phase, _ in phase_log if 12 <= tick < 30)
+    assert any(phase == CourtPhase.LIVE_GAMES for tick, phase, _ in phase_log if 30 <= tick < 60)
+    assert any(phase == CourtPhase.FINISHED for tick, phase, _ in phase_log if 60 <= tick < 120)
+    idle_stability = [stability for tick, phase, stability in phase_log if tick < 30]
+    assert idle_stability and max(idle_stability) >= 12
+
+    history = state.command_history
+    early_names = [name for time, name in history if time < 6]
+    assert early_names == [
+        "GetNamePlayerA",
+        "GetNamePlayerB",
+        "GetNamePlayerA",
+        "GetNamePlayerB",
+        "GetNamePlayerA",
+        "GetNamePlayerB",
+    ]
+
+    def consecutive_diffs(times):
+        return [round(b - a, 6) for a, b in zip(times, times[1:])]
+
+    points_times = [time for time, name in history if name == "GetPoints" and 12 <= time < 30]
+    assert points_times
+    assert all(diff == 2 for diff in consecutive_diffs(points_times))
+
+    games_times = [time for time, name in history if name == "GetGames" and 30 <= time < 60]
+    assert games_times
+    assert all(diff in {4, 5} for diff in consecutive_diffs(games_times))
+
+    probe_points_times = [
+        time for time, name in history if name == "ProbePoints" and 30 <= time < 60
+    ]
+    assert probe_points_times
+    assert all(diff in {6} for diff in consecutive_diffs(probe_points_times))
+
+    finished_a_times = [
+        time for time, name in history if name == "GetNamePlayerA" and 60 <= time < 120
+    ]
+    finished_b_times = [
+        time for time, name in history if name == "GetNamePlayerB" and 60 <= time < 120
+    ]
+    assert finished_a_times and finished_b_times
+    assert all(diff == 30 for diff in consecutive_diffs(finished_a_times))
+    assert all(diff == 30 for diff in consecutive_diffs(finished_b_times))
+
+    for b_time in finished_b_times:
+        preceding_a = max(a for a in finished_a_times if a <= b_time)
+        assert b_time - preceding_a == 15
+
+    assert phase_log[-1][2] >= 1
 
 
 def test_update_snapshot_marks_court_unavailable_on_json_decode_error(caplog):
