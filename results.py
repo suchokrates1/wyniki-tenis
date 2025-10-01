@@ -1,9 +1,12 @@
 import copy
 import logging
+import random
 import threading
 import time
+from collections import deque
 from datetime import datetime, timezone
-from typing import Any, Callable, Dict, List, Optional
+from email.utils import parsedate_to_datetime
+from typing import Any, Callable, Deque, Dict, List, Optional
 from urllib.parse import urlparse
 
 import requests
@@ -19,6 +22,14 @@ SNAPSHOT_STATUS_OK = "ok"
 UPDATE_INTERVAL_SECONDS = 1
 REQUEST_TIMEOUT_SECONDS = 5
 NAME_STABILIZATION_TICKS = 12
+
+PER_CONTROLAPP_MIN_INTERVAL_SECONDS = 1.0
+GLOBAL_RATE_LIMIT_PER_SECOND = 4
+GLOBAL_RATE_WINDOW_SECONDS = 1.0
+MAX_RETRY_ATTEMPTS = 3
+RETRY_BASE_DELAY_SECONDS = 1.0
+RETRY_MAX_DELAY_SECONDS = 10.0
+RETRY_JITTER_MAX_SECONDS = 0.3
 
 FULL_SNAPSHOT_COMMAND = "GetOverlayState"
 
@@ -63,26 +74,117 @@ snapshots: Dict[str, Dict[str, Any]] = {}
 states_lock = threading.Lock()
 court_states: Dict[str, CourtState] = {}
 
+_throttle_lock = threading.Lock()
+_last_request_by_controlapp: Dict[str, float] = {}
+_recent_request_timestamps: Deque[float] = deque()
+
 
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _extract_controlapp_identifier(control_url: str) -> str:
+    parsed = urlparse(control_url)
+    segments = [segment for segment in parsed.path.split("/") if segment]
+    for marker in ("controlapps", "control"):
+        if marker in segments:
+            marker_index = segments.index(marker)
+            try:
+                return segments[marker_index + 1]
+            except IndexError as exc:
+                raise ValueError(
+                    "Nie można wyodrębnić identyfikatora aplikacji kontrolnej z adresu"
+                ) from exc
+    raise ValueError("Nie można wyodrębnić identyfikatora aplikacji kontrolnej z adresu")
 
 
 def build_output_url(control_url: str) -> str:
     if not control_url:
         return control_url
 
-    parsed = urlparse(control_url)
-    segments = [segment for segment in parsed.path.split("/") if segment]
-    try:
-        control_index = segments.index("control")
-        identifier = segments[control_index + 1]
-    except (ValueError, IndexError) as exc:
-        raise ValueError(
-            "Nie można wyodrębnić identyfikatora aplikacji kontrolnej z adresu"
-        ) from exc
+    identifier = _extract_controlapp_identifier(control_url)
 
     return f"https://app.overlays.uno/apiv2/controlapps/{identifier}/api"
+
+
+def _sleep(duration: float) -> None:
+    if duration <= 0:
+        return
+    time.sleep(duration)
+
+
+def _throttle_request(controlapp_id: str, *, current_time: Optional[float] = None) -> None:
+    simulated_time = current_time
+    while True:
+        with _throttle_lock:
+            now_value = simulated_time if simulated_time is not None else time.time()
+            last = _last_request_by_controlapp.get(controlapp_id)
+            wait_for_controlapp = 0.0
+            if last is not None:
+                wait_for_controlapp = (last + PER_CONTROLAPP_MIN_INTERVAL_SECONDS) - now_value
+
+            while _recent_request_timestamps and now_value - _recent_request_timestamps[0] >= GLOBAL_RATE_WINDOW_SECONDS:
+                _recent_request_timestamps.popleft()
+
+            global_available = len(_recent_request_timestamps) < GLOBAL_RATE_LIMIT_PER_SECOND
+
+            if wait_for_controlapp <= 0 and global_available:
+                _last_request_by_controlapp[controlapp_id] = now_value
+                _recent_request_timestamps.append(now_value)
+                return
+
+            wait_time = max(wait_for_controlapp, 0.0)
+            if not global_available and _recent_request_timestamps:
+                earliest = _recent_request_timestamps[0]
+                wait_time = max(wait_time, earliest + GLOBAL_RATE_WINDOW_SECONDS - now_value)
+
+        if simulated_time is not None:
+            simulated_time = now_value + wait_time
+            continue
+
+        _sleep(wait_time)
+
+
+def _parse_retry_after(response: requests.Response) -> Optional[float]:
+    try:
+        header_value = response.headers.get("Retry-After")
+    except Exception:  # noqa: BLE001
+        return None
+
+    if not header_value:
+        return None
+
+    try:
+        seconds = float(header_value)
+        return max(0.0, seconds)
+    except ValueError:
+        try:
+            retry_dt = parsedate_to_datetime(header_value)
+        except (TypeError, ValueError):
+            return None
+
+        if retry_dt is None:
+            return None
+
+        if retry_dt.tzinfo is None:
+            retry_dt = retry_dt.replace(tzinfo=timezone.utc)
+        now = datetime.now(timezone.utc)
+        delta = (retry_dt - now).total_seconds()
+        return max(0.0, delta)
+
+
+def _calculate_retry_delay(attempt: int, response: Optional[requests.Response] = None) -> float:
+    if response is not None:
+        retry_after = _parse_retry_after(response)
+        if retry_after is not None:
+            return retry_after
+
+    delay = min(
+        RETRY_MAX_DELAY_SECONDS,
+        RETRY_BASE_DELAY_SECONDS * (2 ** attempt),
+    )
+    jitter = random.uniform(0, RETRY_JITTER_MAX_SECONDS)
+    return delay + jitter
 
 
 def ensure_snapshot_entry(kort_id: str) -> Dict[str, Any]:
@@ -283,7 +385,7 @@ def _handle_command_error(kort_id: str, error: str) -> Dict[str, Any]:
     entry = ensure_snapshot_entry(kort_id)
     with snapshots_lock:
         entry["error"] = error
-        entry.setdefault("status", SNAPSHOT_STATUS_NO_DATA)
+        entry["status"] = SNAPSHOT_STATUS_UNAVAILABLE
         entry.setdefault("players", {})
         entry.setdefault("raw", {})
         entry.setdefault("archive", entry.get("archive", []))
@@ -577,6 +679,7 @@ def _update_once(
             continue
 
         try:
+            controlapp_identifier = _extract_controlapp_identifier(control_url)
             base_url = build_output_url(control_url)
         except Exception as exc:  # noqa: BLE001
             logger.warning(
@@ -589,61 +692,115 @@ def _update_once(
 
         http = session or requests
         params = {"command": command}
-        try:
-            response = http.get(
-                base_url,
-                params=params,
-                timeout=REQUEST_TIMEOUT_SECONDS,
-            )
-            logger.debug(
-                "Żądanie %s %s zakończone statusem %s",
-                "GET",
-                response.url,
-                response.status_code,
-            )
-        except Exception as exc:  # noqa: BLE001
-            logger.warning(
-                "Nie udało się pobrać komendy %s dla kortu %s: %s",
-                command,
-                kort_id,
-                exc,
-            )
-            snapshot = _handle_command_error(kort_id, error=str(exc))
-            _process_snapshot(state, snapshot, current_time)
-            state.tick_counter += 1
-            continue
+        attempt = 0
+        final_snapshot: Optional[Dict[str, Any]] = None
+        last_error: Optional[str] = None
 
-        if response.status_code == 400:
-            diagnostics = _format_http_error_details(command, response)
-            logger.warning(
-                "Serwer zwrócił błąd 400 dla kortu %s (%s): %s",
-                kort_id,
-                command,
-                diagnostics,
-            )
-            snapshot = _handle_command_error(kort_id, error=diagnostics)
-            _process_snapshot(state, snapshot, current_time)
-            state.tick_counter += 1
-            continue
+        while True:
+            response: Optional[requests.Response] = None
+            should_retry = False
+            try:
+                _throttle_request(controlapp_identifier, current_time=current_time)
+                response = http.get(
+                    base_url,
+                    params=params,
+                    timeout=REQUEST_TIMEOUT_SECONDS,
+                )
+                logger.debug(
+                    "Żądanie %s %s zakończone statusem %s",
+                    "GET",
+                    response.url,
+                    response.status_code,
+                )
+            except requests.Timeout as exc:
+                should_retry = True
+                last_error = str(exc)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "Nie udało się pobrać komendy %s dla kortu %s: %s",
+                    command,
+                    kort_id,
+                    exc,
+                )
+                final_snapshot = _handle_command_error(kort_id, error=str(exc))
+                break
 
-        try:
-            response.raise_for_status()
-            payload = response.json()
-        except Exception as exc:  # noqa: BLE001
-            logger.warning(
-                "Nie udało się pobrać komendy %s dla kortu %s: %s",
-                command,
-                kort_id,
-                exc,
-            )
-            snapshot = _handle_command_error(kort_id, error=str(exc))
-            _process_snapshot(state, snapshot, current_time)
-            state.tick_counter += 1
-            continue
+            if response is not None:
+                status_code = response.status_code
 
-        flattened = _flatten_overlay_payload(payload)
-        snapshot = _merge_partial_payload(kort_id, flattened)
-        _process_snapshot(state, snapshot, current_time)
+                if status_code == 400:
+                    diagnostics = _format_http_error_details(command, response)
+                    logger.warning(
+                        "Serwer zwrócił błąd 400 dla kortu %s (%s): %s",
+                        kort_id,
+                        command,
+                        diagnostics,
+                    )
+                    final_snapshot = _handle_command_error(kort_id, error=diagnostics)
+                    break
+
+                if 400 <= status_code < 500 and status_code != 429:
+                    diagnostics = _format_http_error_details(command, response)
+                    logger.warning(
+                        "Serwer zwrócił błąd %s dla kortu %s (%s): %s",
+                        status_code,
+                        kort_id,
+                        command,
+                        diagnostics,
+                    )
+                    final_snapshot = _handle_command_error(kort_id, error=diagnostics)
+                    break
+
+                if status_code == 429 or status_code >= 500:
+                    should_retry = True
+                    last_error = _format_http_error_details(command, response)
+                else:
+                    try:
+                        response.raise_for_status()
+                        payload = response.json()
+                    except Exception as exc:  # noqa: BLE001
+                        logger.warning(
+                            "Nie udało się pobrać komendy %s dla kortu %s: %s",
+                            command,
+                            kort_id,
+                            exc,
+                        )
+                        final_snapshot = _handle_command_error(kort_id, error=str(exc))
+                        break
+
+                    flattened = _flatten_overlay_payload(payload)
+                    final_snapshot = _merge_partial_payload(kort_id, flattened)
+                    break
+
+            if should_retry:
+                if attempt >= MAX_RETRY_ATTEMPTS:
+                    logger.warning(
+                        "Wyczerpano próby pobierania komendy %s dla kortu %s po %s próbach",
+                        command,
+                        kort_id,
+                        attempt + 1,
+                    )
+                    error_message = last_error or "Nie udało się pobrać danych kortu"
+                    final_snapshot = _handle_command_error(kort_id, error=error_message)
+                    break
+
+                delay = _calculate_retry_delay(attempt, response=response)
+                attempt += 1
+                logger.debug(
+                    "Ponawianie komendy %s dla kortu %s za %.2f s (próba %s)",
+                    command,
+                    kort_id,
+                    delay,
+                    attempt + 1,
+                )
+                _sleep(delay)
+                continue
+
+            break
+
+        if final_snapshot is not None:
+            _process_snapshot(state, final_snapshot, current_time)
+
         state.tick_counter += 1
 
 
