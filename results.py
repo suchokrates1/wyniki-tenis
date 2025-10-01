@@ -20,6 +20,14 @@ SNAPSHOT_STATUS_NO_DATA = "brak danych"
 SNAPSHOT_STATUS_UNAVAILABLE = "niedostępny"
 SNAPSHOT_STATUS_OK = "ok"
 
+_SENSITIVE_FIELD_MARKERS = (
+    "token",
+    "secret",
+    "password",
+    "key",
+    "auth",
+)
+
 UPDATE_INTERVAL_SECONDS = 1
 REQUEST_TIMEOUT_SECONDS = 5
 NAME_STABILIZATION_TICKS = 12
@@ -32,7 +40,7 @@ RETRY_BASE_DELAY_SECONDS = 1.0
 RETRY_MAX_DELAY_SECONDS = 10.0
 RETRY_JITTER_MAX_SECONDS = 0.3
 
-FULL_SNAPSHOT_COMMAND = "GetOverlayState"
+FULL_SNAPSHOT_COMMAND = None
 
 
 CommandPlanEntry = Dict[str, Any]
@@ -696,74 +704,10 @@ def update_snapshot_for_kort(
     *,
     session: Optional[requests.sessions.Session] = None,
 ) -> Dict[str, Any]:
-    ensure_snapshot_entry(kort_id)
-    try:
-        output_url = build_output_url(control_url)
-    except Exception as exc:  # noqa: BLE001
-        logger.warning(
-            "Nie udało się zbudować adresu API dla kortu %s: %s", kort_id, exc
-        )
-        return _mark_unavailable(kort_id, error=str(exc))
-    http = session or requests
-    try:
-        response = http.put(
-            output_url,
-            json={"command": FULL_SNAPSHOT_COMMAND},
-            timeout=REQUEST_TIMEOUT_SECONDS,
-        )
-        logger.info(
-            "Żądanie %s %s zakończone statusem %s",
-            "PUT",
-            response.url,
-            response.status_code,
-        )
-        response.raise_for_status()
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("Nie udało się pobrać danych dla kortu %s: %s", kort_id, exc)
-        return _mark_unavailable(kort_id, error=str(exc))
-
-    try:
-        payload = response.json()
-    except ValueError as exc:
-        logger.warning(
-            "Nie udało się zdekodować JSON dla kortu %s: %s", kort_id, exc
-        )
-        return _mark_unavailable(kort_id, error=str(exc))
-
-    try:
-        parsed = parse_overlay_json(payload)
-    except Exception as exc:  # noqa: BLE001
-        logger.warning(
-            "Nie udało się przeparsować danych dla kortu %s: %s", kort_id, exc
-        )
-        return _mark_unavailable(kort_id, error=str(exc))
-
-    players = parsed["players"]
-    serving = parsed["serving"]
-
-    payload = {
-        "kort_id": str(kort_id),
-        "status": SNAPSHOT_STATUS_OK,
-        "last_updated": _now_iso(),
-        "players": {
-            suffix: {
-                **info,
-                "is_serving": serving == suffix,
-            }
-            for suffix, info in players.items()
-        },
-        "raw": parsed["raw"],
-        "serving": serving,
-        "error": None,
-    }
-
     entry = ensure_snapshot_entry(kort_id)
     with snapshots_lock:
-        archive = entry.get("archive", [])
-        entry.update(payload)
-        entry["archive"] = archive
-        payload = copy.deepcopy(entry)
-    return payload
+        snapshot = copy.deepcopy(entry)
+    return snapshot
 
 
 def _mark_unavailable(kort_id: str, *, error: Optional[str]) -> Dict[str, Any]:
