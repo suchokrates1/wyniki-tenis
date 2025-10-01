@@ -4,7 +4,7 @@ import threading
 import time
 from datetime import datetime, timezone
 from typing import Any, Callable, Dict, List, Optional
-from urllib.parse import quote_plus, urlparse
+from urllib.parse import urlparse
 
 import requests
 
@@ -19,6 +19,8 @@ SNAPSHOT_STATUS_OK = "ok"
 UPDATE_INTERVAL_SECONDS = 1
 REQUEST_TIMEOUT_SECONDS = 5
 NAME_STABILIZATION_TICKS = 12
+
+FULL_SNAPSHOT_COMMAND = "GetOverlayState"
 
 
 CommandPlanEntry = Dict[str, Any]
@@ -433,7 +435,11 @@ def update_snapshot_for_kort(
         return _mark_unavailable(kort_id, error=str(exc))
     http = session or requests
     try:
-        response = http.get(output_url, timeout=REQUEST_TIMEOUT_SECONDS)
+        response = http.put(
+            output_url,
+            json={"command": FULL_SNAPSHOT_COMMAND},
+            timeout=REQUEST_TIMEOUT_SECONDS,
+        )
         response.raise_for_status()
     except Exception as exc:  # noqa: BLE001
         logger.warning("Nie udało się pobrać danych dla kortu %s: %s", kort_id, exc)
@@ -545,10 +551,13 @@ def _update_once(
             state.tick_counter += 1
             continue
 
-        command_url = f"{base_url}?command={quote_plus(command)}"
         http = session or requests
         try:
-            response = http.get(command_url, timeout=REQUEST_TIMEOUT_SECONDS)
+            response = http.put(
+                base_url,
+                json={"command": command},
+                timeout=REQUEST_TIMEOUT_SECONDS,
+            )
             response.raise_for_status()
             payload = response.json()
         except Exception as exc:  # noqa: BLE001
