@@ -292,6 +292,36 @@ def _handle_command_error(kort_id: str, error: str) -> Dict[str, Any]:
     return snapshot
 
 
+def _format_http_error_details(command: str, response: requests.Response) -> str:
+    try:
+        url = response.url
+    except Exception:  # noqa: BLE001
+        url = "<unknown>"
+    try:
+        body = response.text or ""
+    except Exception:  # noqa: BLE001
+        body = "<unavailable>"
+    body = body.strip()
+    max_length = 256
+    if len(body) > max_length:
+        body = f"{body[:max_length]}…"
+    content_type = ""
+    try:
+        content_type = response.headers.get("Content-Type", "")
+    except Exception:  # noqa: BLE001
+        content_type = ""
+    parts = [
+        f"HTTP {response.status_code}",
+        f"url={url}",
+        f"command={command}",
+    ]
+    if content_type:
+        parts.append(f"content_type={content_type}")
+    if body:
+        parts.append(f"body={body}")
+    return ", ".join(parts)
+
+
 def _archive_snapshot(kort_id: str, snapshot: Dict[str, Any]) -> Dict[str, Any]:
     archive_entry = {
         "kort_id": snapshot.get("kort_id"),
@@ -435,10 +465,16 @@ def update_snapshot_for_kort(
         return _mark_unavailable(kort_id, error=str(exc))
     http = session or requests
     try:
-        response = http.put(
+        response = http.get(
             output_url,
-            json={"command": FULL_SNAPSHOT_COMMAND},
+            params={"command": FULL_SNAPSHOT_COMMAND},
             timeout=REQUEST_TIMEOUT_SECONDS,
+        )
+        logger.info(
+            "Żądanie %s %s zakończone statusem %s",
+            "GET",
+            response.url,
+            response.status_code,
         )
         response.raise_for_status()
     except Exception as exc:  # noqa: BLE001
@@ -552,12 +588,45 @@ def _update_once(
             continue
 
         http = session or requests
+        params = {"command": command}
         try:
-            response = http.put(
+            response = http.get(
                 base_url,
-                json={"command": command},
+                params=params,
                 timeout=REQUEST_TIMEOUT_SECONDS,
             )
+            logger.debug(
+                "Żądanie %s %s zakończone statusem %s",
+                "GET",
+                response.url,
+                response.status_code,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "Nie udało się pobrać komendy %s dla kortu %s: %s",
+                command,
+                kort_id,
+                exc,
+            )
+            snapshot = _handle_command_error(kort_id, error=str(exc))
+            _process_snapshot(state, snapshot, current_time)
+            state.tick_counter += 1
+            continue
+
+        if response.status_code == 400:
+            diagnostics = _format_http_error_details(command, response)
+            logger.warning(
+                "Serwer zwrócił błąd 400 dla kortu %s (%s): %s",
+                kort_id,
+                command,
+                diagnostics,
+            )
+            snapshot = _handle_command_error(kort_id, error=diagnostics)
+            _process_snapshot(state, snapshot, current_time)
+            state.tick_counter += 1
+            continue
+
+        try:
             response.raise_for_status()
             payload = response.json()
         except Exception as exc:  # noqa: BLE001
