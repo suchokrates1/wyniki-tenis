@@ -1,5 +1,7 @@
 import copy
 import json
+from urllib.parse import urlencode
+
 import pytest
 import requests
 from requests import RequestException
@@ -90,6 +92,8 @@ class DummyResponse:
         self._payload = payload
         self.status_code = status_code
         self._json_error = json_error
+        self.headers: dict[str, str] = {}
+        self.url: str | None = None
 
     def raise_for_status(self) -> None:
         if self.status_code >= 400:
@@ -100,21 +104,34 @@ class DummyResponse:
             raise self._json_error
         return self._payload
 
+    @property
+    def text(self) -> str:
+        if isinstance(self._payload, (dict, list)):
+            try:
+                return json.dumps(self._payload)
+            except TypeError:
+                return str(self._payload)
+        return "" if self._payload is None else str(self._payload)
+
 
 class DummySession:
     def __init__(self, response: DummyResponse):
         self._response = response
         self.requests: list[dict[str, object]] = []
 
-    def put(self, url: str, timeout: int, json: dict | None = None):
+    def get(self, url: str, timeout: int, params: dict | None = None):
+        query = urlencode(params or {}, doseq=True)
+        final_url = f"{url}?{query}" if query else url
         self.requests.append(
             {
-                "method": "PUT",
+                "method": "GET",
                 "url": url,
                 "timeout": timeout,
-                "json": copy.deepcopy(json),
+                "params": copy.deepcopy(params),
+                "full_url": final_url,
             }
         )
+        self._response.url = final_url
         return self._response
 
 
@@ -122,7 +139,7 @@ class FailingSession:
     def __init__(self, exc: Exception):
         self._exc = exc
 
-    def put(self, url: str, timeout: int, json: dict | None = None):
+    def get(self, url: str, timeout: int, params: dict | None = None):
         raise self._exc
 
 
@@ -164,12 +181,13 @@ def test_update_snapshot_for_kort_parses_players_and_serving():
     assert snapshot["players"]["B"]["is_serving"] is False
     assert snapshot.get("archive") == []
     assert snapshots["1"] == snapshot
-    assert session.requests[0]["method"] == "PUT"
+    assert session.requests[0]["method"] == "GET"
     assert (
-        session.requests[0]["url"]
-        == "https://app.overlays.uno/apiv2/controlapps/live/api"
+        session.requests[0]["full_url"]
+        == "https://app.overlays.uno/apiv2/controlapps/live/api?command="
+        f"{results_module.FULL_SNAPSHOT_COMMAND}"
     )
-    assert session.requests[0]["json"] == {
+    assert session.requests[0]["params"] == {
         "command": results_module.FULL_SNAPSHOT_COMMAND
     }
 
@@ -522,14 +540,14 @@ def test_update_once_cycles_commands_and_transitions(monkeypatch):
     assert phase_log[-1][2] >= 1
 
     issued_commands = [
-        request["json"]["command"]
+        request["params"]["command"]
         for request in session.requests
-        if isinstance(request.get("json"), dict)
-        and "command" in request["json"]
+        if isinstance(request.get("params"), dict)
+        and "command" in request["params"]
     ]
 
     assert session.requests and all(
-        request["method"] == "PUT" for request in session.requests
+        request["method"] == "GET" for request in session.requests
     )
     assert issued_commands
     assert all("GetMatchStatus" not in command for command in issued_commands)
