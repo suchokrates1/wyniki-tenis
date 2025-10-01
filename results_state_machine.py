@@ -6,7 +6,7 @@ import enum
 import hashlib
 import json
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 
 class CourtPhase(enum.Enum):
@@ -33,6 +33,76 @@ def _fingerprint(data: Dict[str, object]) -> str:
     except TypeError:
         normalized = {k: str(v) for k, v in data.items()}
         return json.dumps(normalized, sort_keys=True)
+
+
+def _normalize_int(value: object) -> Optional[int]:
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        return int(value)
+    if isinstance(value, (int, float)):
+        return int(value)
+    text = str(value).strip()
+    if not text or text.lower() in {"na", "null", "none", "-"}:
+        return None
+    try:
+        return int(float(text))
+    except ValueError:
+        return None
+
+
+def _point_category(value: object) -> str:
+    if value is None:
+        return "unknown"
+    if isinstance(value, (int, float)):
+        return "positive" if value > 0 else "zero"
+    text = str(value).strip().lower()
+    if not text or text in {"-", "", "na", "null", "none"}:
+        return "unknown"
+    if text in {"0", "00", "love", "l"}:
+        return "zero"
+    if text.isdigit():
+        return "positive" if int(text) > 0 else "zero"
+    if text in {"ad", "adv", "advantage", "game", "won", "w"}:
+        return "positive"
+    return "positive"
+
+
+def _truthy(value: object) -> bool:
+    if value is None:
+        return False
+    if isinstance(value, bool):
+        return value
+    text = str(value).strip().lower()
+    return text in {
+        "1",
+        "true",
+        "yes",
+        "on",
+        "tak",
+        "finished",
+        "finish",
+        "complete",
+        "completed",
+        "done",
+    }
+
+
+@dataclass
+class ScoreSnapshot:
+    points_known: bool
+    points_any: bool
+    points_positive: bool
+    points_zero: bool
+    games_known: bool
+    games_any: bool
+    games_positive: bool
+    sets_present: bool
+    sets_completed: int
+    total_sets: int
+    sets_won: Tuple[int, int]
+    tie_break_active: bool
+    super_tb_active: bool
 
 
 @dataclass
@@ -118,6 +188,9 @@ class CourtState:
     last_command_at: Optional[float] = None
     last_name_signature: Optional[str] = None
     name_stability: int = 0
+    last_score_snapshot: Optional[ScoreSnapshot] = None
+    points_positive_streak: int = 0
+    points_absent_streak: int = 0
 
     # --- pola z gałęzi "main" (rotacja A/B itp.)
     tick_counter: int = 0
@@ -181,6 +254,108 @@ class CourtState:
             self.name_stability = 1
         self.last_name_signature = signature
 
+    def compute_score_snapshot(self, snapshot: Dict[str, object]) -> ScoreSnapshot:
+        raw = snapshot.get("raw")
+        if not isinstance(raw, dict):
+            raw = {}
+        players = snapshot.get("players")
+        if not isinstance(players, dict):
+            players = {}
+
+        point_values = []
+        for suffix in ("A", "B"):
+            player = players.get(suffix) or {}
+            value = player.get("points")
+            if value in {None, "", "-"}:
+                value = raw.get(f"PointsPlayer{suffix}")
+            point_values.append(value)
+        point_categories = [_point_category(value) for value in point_values]
+        points_known = all(category != "unknown" for category in point_categories)
+        points_any = any(category != "unknown" for category in point_categories)
+        points_positive = any(category == "positive" for category in point_categories)
+        points_zero = points_known and not points_positive
+
+        game_values = []
+        for suffix in ("A", "B"):
+            value = None
+            for key in (
+                f"CurrentGamePlayer{suffix}",
+                f"GamesPlayer{suffix}",
+                f"GamePlayer{suffix}",
+            ):
+                if key in raw:
+                    value = raw.get(key)
+                    break
+            game_values.append(_normalize_int(value))
+        games_known = all(value is not None for value in game_values)
+        games_any = any(value is not None for value in game_values)
+        games_positive = any((value or 0) > 0 for value in game_values)
+
+        set_scores: List[Tuple[Optional[int], Optional[int]]] = []
+        for index in range(1, 8):
+            key_a = f"Set{index}PlayerA"
+            key_b = f"Set{index}PlayerB"
+            value_a = _normalize_int(raw.get(key_a))
+            value_b = _normalize_int(raw.get(key_b))
+            if value_a is None and value_b is None:
+                continue
+            set_scores.append((value_a, value_b))
+        total_sets = len(set_scores)
+        sets_completed = sum(1 for a, b in set_scores if a is not None and b is not None)
+        sets_won_a = sum(1 for a, b in set_scores if a is not None and b is not None and a > b)
+        sets_won_b = sum(1 for a, b in set_scores if a is not None and b is not None and b > a)
+        sets_present = total_sets > 0
+
+        raw_tie_break = any(
+            _truthy(raw.get(key))
+            for key in (
+                "TieBreak",
+                "Tiebreak",
+                "MatchTieBreak",
+                "SetTieBreak",
+                "TieBreakInProgress",
+            )
+        )
+        super_tb_active = any(
+            _truthy(raw.get(key))
+            for key in (
+                "SuperTieBreak",
+                "SuperTiebreak",
+                "MatchSuperTieBreak",
+                "SuperTieBreakInProgress",
+            )
+        )
+        tie_break_active = bool(raw_tie_break and not super_tb_active)
+
+        snapshot = ScoreSnapshot(
+            points_known=points_known,
+            points_any=points_any,
+            points_positive=points_positive,
+            points_zero=points_zero,
+            games_known=games_known,
+            games_any=games_any,
+            games_positive=games_positive,
+            sets_present=sets_present,
+            sets_completed=sets_completed,
+            total_sets=total_sets,
+            sets_won=(sets_won_a, sets_won_b),
+            tie_break_active=tie_break_active,
+            super_tb_active=super_tb_active,
+        )
+        self.last_score_snapshot = snapshot
+        return snapshot
+
+    def update_score_stability(self, score: ScoreSnapshot) -> None:
+        if score.points_positive:
+            self.points_positive_streak = min(self.points_positive_streak + 1, 10_000)
+        else:
+            self.points_positive_streak = 0
+
+        if score.sets_present and not score.points_any:
+            self.points_absent_streak = min(self.points_absent_streak + 1, 10_000)
+        else:
+            self.points_absent_streak = 0
+
     def pop_due_command(self, now: float) -> Optional[str]:
         if not self.command_schedules:
             return None
@@ -213,4 +388,10 @@ class CourtState:
         return schedule.last_run
 
 
-__all__ = ["CourtPhase", "CourtState", "CommandSpec", "CommandSchedule"]
+__all__ = [
+    "CourtPhase",
+    "CourtState",
+    "CommandSpec",
+    "CommandSchedule",
+    "ScoreSnapshot",
+]
