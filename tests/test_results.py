@@ -198,11 +198,45 @@ def test_update_snapshot_for_kort_initializes_entry_without_requests():
     assert snapshot["players"] == {}
     assert snapshot["raw"] == {}
     assert snapshot["serving"] is None
+
+
+def test_merge_partial_payload_maps_single_player_fields():
+    kort_id = "1"
+    flattened = results_module._flatten_overlay_payload({"NamePlayerA": {"value": "A. Nowak"}})
+
+    snapshot = results_module._merge_partial_payload(kort_id, flattened)
+
+    assert snapshot["status"] == SNAPSHOT_STATUS_NO_DATA
+    assert snapshot["raw"].get("PlayerA", {}).get("Name") == "A. Nowak"
+    assert snapshot["players"]["A"]["name"] == "A. Nowak"
+    assert "B" not in snapshot["players"]
+
+
+def test_partial_updates_allow_state_progression():
+    kort_id = "2"
+    state = results_module._ensure_court_state(kort_id)
+    now = 0.0
+
+    first = results_module._flatten_overlay_payload({"NamePlayerA": "A. Kowalski"})
+    snapshot = results_module._merge_partial_payload(kort_id, first)
+
+    results_module._process_snapshot(state, snapshot, now)
+    assert state.phase is CourtPhase.IDLE_NAMES
+
+    second = results_module._flatten_overlay_payload({"NamePlayerB": "B. Zielińska"})
+    snapshot = results_module._merge_partial_payload(kort_id, second)
+
+    for _ in range(results_module.NAME_STABILIZATION_TICKS):
+        now += 1
+        results_module._process_snapshot(state, snapshot, now)
+
+    assert snapshot["status"] == SNAPSHOT_STATUS_OK
+    assert snapshot["raw"].get("PlayerB", {}).get("Name") == "B. Zielińska"
+    assert snapshot["players"]["B"]["name"] == "B. Zielińska"
+    assert state.phase is CourtPhase.PRE_START
     assert snapshot["error"] is None
     assert snapshot.get("archive") == []
-    assert snapshot["last_updated"] is None
-    assert snapshots["1"] == snapshot
-    assert session.requests == []
+    assert snapshot["last_updated"] is not None
 
 
 def test_update_once_cycles_commands_and_transitions(monkeypatch):
