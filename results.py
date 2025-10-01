@@ -666,14 +666,14 @@ def update_snapshot_for_kort(
         return _mark_unavailable(kort_id, error=str(exc))
     http = session or requests
     try:
-        response = http.get(
+        response = http.put(
             output_url,
-            params={"command": FULL_SNAPSHOT_COMMAND},
+            json={"command": FULL_SNAPSHOT_COMMAND},
             timeout=REQUEST_TIMEOUT_SECONDS,
         )
         logger.info(
             "Żądanie %s %s zakończone statusem %s",
-            "GET",
+            "PUT",
             response.url,
             response.status_code,
         )
@@ -790,7 +790,7 @@ def _update_once(
             continue
 
         http = session or requests
-        params = {"command": command}
+        payload = {"command": command}
         attempt = 0
         final_snapshot: Optional[Dict[str, Any]] = None
         last_error: Optional[str] = None
@@ -800,14 +800,14 @@ def _update_once(
             should_retry = False
             try:
                 _throttle_request(controlapp_identifier, current_time=current_time)
-                response = http.get(
+                response = http.put(
                     base_url,
-                    params=params,
+                    json=payload,
                     timeout=REQUEST_TIMEOUT_SECONDS,
                 )
                 logger.debug(
                     "Żądanie %s %s zakończone statusem %s",
-                    "GET",
+                    "PUT",
                     response.url,
                     response.status_code,
                 )

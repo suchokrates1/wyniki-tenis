@@ -1,6 +1,5 @@
 import copy
 import json
-from urllib.parse import urlencode
 
 import pytest
 import requests
@@ -121,19 +120,16 @@ class DummySession:
         self._response = response
         self.requests: list[dict[str, object]] = []
 
-    def get(self, url: str, timeout: int, params: dict | None = None):
-        query = urlencode(params or {}, doseq=True)
-        final_url = f"{url}?{query}" if query else url
+    def put(self, url: str, timeout: int, json: dict | None = None):
         self.requests.append(
             {
-                "method": "GET",
+                "method": "PUT",
                 "url": url,
                 "timeout": timeout,
-                "params": copy.deepcopy(params),
-                "full_url": final_url,
+                "json": copy.deepcopy(json),
             }
         )
-        self._response.url = final_url
+        self._response.url = url
         return self._response
 
 
@@ -141,7 +137,7 @@ class FailingSession:
     def __init__(self, exc: Exception):
         self._exc = exc
 
-    def get(self, url: str, timeout: int, params: dict | None = None):
+    def put(self, url: str, timeout: int, json: dict | None = None):
         raise self._exc
 
 
@@ -150,22 +146,19 @@ class SequenceSession:
         self._responses = list(responses)
         self.requests: list[dict[str, object]] = []
 
-    def get(self, url: str, timeout: int, params: dict | None = None):
+    def put(self, url: str, timeout: int, json: dict | None = None):
         if not self._responses:
             raise AssertionError("No more responses configured")
         response = self._responses.pop(0)
-        query = urlencode(params or {}, doseq=True)
-        final_url = f"{url}?{query}" if query else url
         self.requests.append(
             {
-                "method": "GET",
+                "method": "PUT",
                 "url": url,
                 "timeout": timeout,
-                "params": copy.deepcopy(params),
-                "full_url": final_url,
+                "json": copy.deepcopy(json),
             }
         )
-        response.url = final_url
+        response.url = url
         return response
 
 
@@ -220,13 +213,12 @@ def test_update_snapshot_for_kort_parses_players_and_serving():
     assert snapshot["players"]["B"]["is_serving"] is False
     assert snapshot.get("archive") == []
     assert snapshots["1"] == snapshot
-    assert session.requests[0]["method"] == "GET"
+    assert session.requests[0]["method"] == "PUT"
     assert (
-        session.requests[0]["full_url"]
-        == "https://app.overlays.uno/apiv2/controlapps/live/api?command="
-        f"{results_module.FULL_SNAPSHOT_COMMAND}"
+        session.requests[0]["url"]
+        == "https://app.overlays.uno/apiv2/controlapps/live/api"
     )
-    assert session.requests[0]["params"] == {
+    assert session.requests[0]["json"] == {
         "command": results_module.FULL_SNAPSHOT_COMMAND
     }
 
@@ -593,14 +585,14 @@ def test_update_once_cycles_commands_and_transitions(monkeypatch):
     assert phase_log[-1][2] >= 1
 
     issued_commands = [
-        request["params"]["command"]
+        request["json"]["command"]
         for request in session.requests
-        if isinstance(request.get("params"), dict)
-        and "command" in request["params"]
+        if isinstance(request.get("json"), dict)
+        and "command" in request["json"]
     ]
 
     assert session.requests and all(
-        request["method"] == "GET" for request in session.requests
+        request["method"] == "PUT" for request in session.requests
     )
     assert issued_commands
     assert all("GetMatchStatus" not in command for command in issued_commands)
