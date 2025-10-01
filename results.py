@@ -8,7 +8,7 @@ from urllib.parse import quote_plus, urlparse
 
 import requests
 
-from results_state_machine import CourtPhase, CourtState, STATE_INTERVALS
+from results_state_machine import CourtPhase, CourtState
 
 logger = logging.getLogger(__name__)
 
@@ -16,7 +16,7 @@ SNAPSHOT_STATUS_NO_DATA = "brak danych"
 SNAPSHOT_STATUS_UNAVAILABLE = "niedostępny"
 SNAPSHOT_STATUS_OK = "ok"
 
-UPDATE_INTERVAL_SECONDS = 2
+UPDATE_INTERVAL_SECONDS = 1
 REQUEST_TIMEOUT_SECONDS = 5
 NAME_STABILIZATION_TICKS = 12
 
@@ -392,6 +392,9 @@ def _classify_phase(snapshot: Dict[str, Any], state: CourtState) -> CourtPhase:
     if not any(part.strip() for part in name_signature.split("|")):
         return CourtPhase.IDLE_NAMES
 
+    if state.phase is CourtPhase.IDLE_NAMES and state.name_stability < 12:
+        return CourtPhase.IDLE_NAMES
+
     raw = snapshot.get("raw") or {}
     raw_status = str(
         raw.get("ScoreMatchStatus")
@@ -435,8 +438,9 @@ def _classify_phase(snapshot: Dict[str, Any], state: CourtState) -> CourtPhase:
 
 def _process_snapshot(state: CourtState, snapshot: Dict[str, Any], now: float) -> None:
     state.mark_polled(now)
-    desired_phase = _classify_phase(snapshot, state)
     name_signature = state.compute_name_signature(snapshot)
+    state.update_name_stability(name_signature)
+    desired_phase = _classify_phase(snapshot, state)
     raw_signature = state.compute_raw_signature(snapshot)
 
     if (
@@ -446,7 +450,6 @@ def _process_snapshot(state: CourtState, snapshot: Dict[str, Any], now: float) -
         and name_signature != state.finished_name_signature
     ):
         state.transition(CourtPhase.IDLE_NAMES, now)
-        state.next_poll = now
         return
 
     if (
@@ -456,7 +459,6 @@ def _process_snapshot(state: CourtState, snapshot: Dict[str, Any], now: float) -
         and raw_signature != state.finished_raw_signature
     ):
         state.transition(CourtPhase.IDLE_NAMES, now)
-        state.next_poll = now
         return
 
     previous_phase = state.phase
@@ -471,7 +473,7 @@ def _process_snapshot(state: CourtState, snapshot: Dict[str, Any], now: float) -
         state.finished_name_signature = None
         state.finished_raw_signature = None
 
-    state.schedule_next(now)
+    # Harmonogram komend aktualizowany jest w CourtState podczas przejść
 
 
 def update_snapshot_for_kort(
@@ -581,7 +583,8 @@ def _update_once(
         if not control_url:
             logger.warning("Pominięto kort %s - brak adresu control", kort_id)
             continue
-        if state.next_poll and current_time < state.next_poll:
+        command = state.pop_due_command(current_time)
+        if not command:
             continue
 
         command = _select_command(state)
@@ -641,8 +644,11 @@ def start_background_updater(
 
     def runner() -> None:
         while True:
-            _update_once(app, overlay_links_supplier, session=session)
-            time.sleep(UPDATE_INTERVAL_SECONDS)
+            tick_start = time.time()
+            _update_once(app, overlay_links_supplier, session=session, now=tick_start)
+            elapsed = time.time() - tick_start
+            sleep_time = max(0.0, UPDATE_INTERVAL_SECONDS - elapsed)
+            time.sleep(sleep_time)
 
     # Ustawiamy wstępnie stan kortów na "brak danych"
     try:
