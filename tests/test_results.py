@@ -82,13 +82,19 @@ def test_results_page_shows_placeholder_for_finished_section(client, snapshots_d
 # --- Pomocnicze klasy do testów parsera --------------------------------------
 
 class DummyResponse:
-    def __init__(self, text: str, status_code: int = 200):
-        self.text = text
+    def __init__(self, payload, status_code: int = 200, json_error: Exception | None = None):
+        self._payload = payload
         self.status_code = status_code
+        self._json_error = json_error
 
     def raise_for_status(self) -> None:
         if self.status_code >= 400:
             raise requests.HTTPError(f"status: {self.status_code}")
+
+    def json(self):
+        if self._json_error:
+            raise self._json_error
+        return self._payload
 
 
 class DummySession:
@@ -111,23 +117,28 @@ class FailingSession:
 
 # --- Testy logiki parsera/snapshotów -----------------------------------------
 
-def test_build_output_url_replaces_control_segment():
-    url = "https://example.com/control/stream"
-    assert build_output_url(url) == "https://example.com/output/stream"
+def test_build_output_url_extracts_identifier():
+    url = "https://app.overlays.uno/control/abc123"
+    assert (
+        build_output_url(url)
+        == "https://app.overlays.uno/apiv2/controlapps/abc123/api"
+    )
 
 
 def test_update_snapshot_for_kort_parses_players_and_serving():
-    html = """
-    <div data-singular-name="PlayerA" data-singular-value="Player One"></div>
-    <div data-singular-name="PlayerB" data-singular-value="Player Two"></div>
-    <div data-singular-name="PointsPlayerA" data-singular-value="15"></div>
-    <div data-singular-name="PointsPlayerB" data-singular-value="30"></div>
-    <div data-singular-name="Set1PlayerA" data-singular-value="6"></div>
-    <div data-singular-name="Set1PlayerB" data-singular-value="4"></div>
-    <div data-singular-name="ServePlayerA" data-singular-value="true"></div>
-    <div data-singular-name="ServePlayerB" data-singular-value="false"></div>
-    """
-    response = DummyResponse(html)
+    payload = {
+        "data": {
+            "PlayerA": {"value": "Player One"},
+            "PlayerB": {"value": "Player Two"},
+            "PointsPlayerA": {"value": "15"},
+            "PointsPlayerB": {"value": "30"},
+            "Set1PlayerA": {"value": "6"},
+            "Set1PlayerB": {"value": "4"},
+            "ServePlayerA": {"value": "true"},
+            "ServePlayerB": {"value": "false"},
+        }
+    }
+    response = DummyResponse(payload)
     session = DummySession(response)
 
     snapshot = update_snapshot_for_kort(
@@ -141,7 +152,10 @@ def test_update_snapshot_for_kort_parses_players_and_serving():
     assert snapshot["players"]["A"]["is_serving"] is True
     assert snapshot["players"]["B"]["is_serving"] is False
     assert snapshots["1"] == snapshot
-    assert session.requested_urls[0][0] == "https://example.com/output/live"
+    assert (
+        session.requested_urls[0][0]
+        == "https://app.overlays.uno/apiv2/controlapps/live/api"
+    )
 
 
 def test_update_snapshot_marks_court_unavailable_on_network_error(caplog):
@@ -158,8 +172,8 @@ def test_update_snapshot_marks_court_unavailable_on_network_error(caplog):
 
 
 def test_update_snapshot_marks_court_unavailable_on_parse_error(caplog):
-    html = "<div data-singular-name='PlayerA' data-singular-value='Solo'></div>"
-    response = DummyResponse(html)
+    payload = {"PlayerA": "Solo"}
+    response = DummyResponse(payload)
     session = DummySession(response)
 
     snapshot = update_snapshot_for_kort(
@@ -169,3 +183,16 @@ def test_update_snapshot_marks_court_unavailable_on_parse_error(caplog):
     assert snapshot["status"] == SNAPSHOT_STATUS_UNAVAILABLE
     assert snapshot["error"]
     assert "kortu 3" in caplog.text
+
+
+def test_update_snapshot_marks_court_unavailable_on_json_decode_error(caplog):
+    response = DummyResponse(None, json_error=ValueError("invalid json"))
+    session = DummySession(response)
+
+    snapshot = update_snapshot_for_kort(
+        "4", "https://example.com/control/live", session=session
+    )
+
+    assert snapshot["status"] == SNAPSHOT_STATUS_UNAVAILABLE
+    assert snapshot["error"]
+    assert "kortu 4" in caplog.text
