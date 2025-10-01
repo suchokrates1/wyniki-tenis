@@ -691,6 +691,44 @@ def test_update_once_cycles_commands_and_transitions(monkeypatch):
             assert trailing_diffs and all(diff == 1 for diff in trailing_diffs)
 
 
+def test_update_once_logs_successful_payload(monkeypatch, caplog):
+    snapshots.clear()
+    results_module.court_states.clear()
+
+    overlay_links = {"1": {"control": "https://app.overlays.uno/control/logs"}}
+
+    def supplier():
+        return overlay_links
+
+    success_payload = {
+        "PlayerA": {"value": "Player One"},
+        "PlayerB": {"value": "Player Two"},
+        "PointsPlayerA": {"value": "15"},
+        "PointsPlayerB": {"value": "30"},
+        "authToken": "super-secret-token",
+    }
+
+    session = DummySession(DummyResponse(success_payload, status_code=200))
+
+    fake_time = TimeController(start=10.0)
+    monkeypatch.setattr(results_module.time, "time", fake_time.time)
+    monkeypatch.setattr(results_module.time, "sleep", fake_time.sleep)
+
+    caplog.set_level("DEBUG", logger=results_module.logger.name)
+
+    results_module._update_once(app, supplier, session=session, now=fake_time.time())
+
+    success_logs = [
+        record for record in caplog.records if "Odpowiedź komendy" in record.getMessage()
+    ]
+    assert success_logs, f"Brak logów sukcesu w caplog: {caplog.text}"
+    message = success_logs[0].getMessage()
+    assert "GetNamePlayer" in message
+    assert "PointsPlayerA" in message
+    assert "***" in message  # maskowanie wrażliwych danych
+    assert "super-secret-token" not in message
+
+
 def test_update_once_retries_after_429(monkeypatch):
     snapshots.clear()
     results_module.court_states.clear()

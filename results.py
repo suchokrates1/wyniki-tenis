@@ -1,4 +1,5 @@
 import copy
+import json
 import logging
 import random
 import threading
@@ -137,6 +138,45 @@ _recent_request_timestamps: Deque[float] = deque()
 
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _shorten_for_logging(text: str, max_length: int = 256) -> str:
+    if len(text) <= max_length:
+        return text
+    return f"{text[: max_length - 1]}…"
+
+
+def _is_sensitive_key(key: Any) -> bool:
+    try:
+        key_text = str(key).lower()
+    except Exception:  # noqa: BLE001
+        return False
+    return any(marker in key_text for marker in _SENSITIVE_FIELD_MARKERS)
+
+
+def _sanitize_for_logging(value: Any) -> Any:
+    if isinstance(value, dict):
+        sanitized: Dict[Any, Any] = {}
+        for key, item in value.items():
+            if _is_sensitive_key(key):
+                sanitized[key] = "***"
+            else:
+                sanitized[key] = _sanitize_for_logging(item)
+        return sanitized
+    if isinstance(value, list):
+        return [_sanitize_for_logging(item) for item in value]
+    if isinstance(value, str):
+        return _shorten_for_logging(value, max_length=128)
+    return value
+
+
+def _format_payload_for_logging(payload: Any, *, max_length: int = 512) -> str:
+    sanitized = _sanitize_for_logging(payload)
+    try:
+        text = json.dumps(sanitized, ensure_ascii=False, sort_keys=True)
+    except TypeError:
+        text = str(sanitized)
+    return _shorten_for_logging(text, max_length=max_length)
 
 
 def _extract_controlapp_identifier(control_url: str) -> str:
@@ -867,6 +907,12 @@ def _update_once(
                         final_snapshot = _handle_command_error(kort_id, error=str(exc))
                         break
 
+                    logger.debug(
+                        "Odpowiedź komendy %s dla kortu %s: %s",
+                        command,
+                        kort_id,
+                        _format_payload_for_logging(payload),
+                    )
                     flattened = _flatten_overlay_payload(payload)
                     final_snapshot = _merge_partial_payload(kort_id, flattened)
                     break
@@ -885,12 +931,16 @@ def _update_once(
 
                 delay = _calculate_retry_delay(attempt, response=response)
                 attempt += 1
+                retry_reason = last_error or (
+                    f"HTTP {response.status_code}" if response is not None else "nieznany powód"
+                )
                 logger.debug(
-                    "Ponawianie komendy %s dla kortu %s za %.2f s (próba %s)",
+                    "Ponawianie komendy %s dla kortu %s za %.2f s (próba %s, powód: %s)",
                     command,
                     kort_id,
                     delay,
                     attempt + 1,
+                    _shorten_for_logging(str(retry_reason)),
                 )
                 _sleep(delay)
                 continue
@@ -952,3 +1002,4 @@ __all__ = [
     "start_background_updater",
     "update_snapshot_for_kort",
 ]
+
