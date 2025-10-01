@@ -4,9 +4,9 @@ import threading
 import time
 from datetime import datetime, timezone
 from typing import Any, Callable, Dict, Optional
+from urllib.parse import urlparse
 
 import requests
-from bs4 import BeautifulSoup
 
 from results_state_machine import CourtPhase, CourtState, STATE_INTERVALS
 
@@ -33,7 +33,18 @@ def _now_iso() -> str:
 def build_output_url(control_url: str) -> str:
     if not control_url:
         return control_url
-    return control_url.replace("/control/", "/output/", 1)
+
+    parsed = urlparse(control_url)
+    segments = [segment for segment in parsed.path.split("/") if segment]
+    try:
+        control_index = segments.index("control")
+        identifier = segments[control_index + 1]
+    except (ValueError, IndexError) as exc:
+        raise ValueError(
+            "Nie można wyodrębnić identyfikatora aplikacji kontrolnej z adresu"
+        ) from exc
+
+    return f"https://app.overlays.uno/apiv2/controlapps/{identifier}/api"
 
 
 def ensure_snapshot_entry(kort_id: str) -> Dict[str, Any]:
@@ -54,24 +65,52 @@ def ensure_snapshot_entry(kort_id: str) -> Dict[str, Any]:
     return entry
 
 
-def parse_overlay_html(html: str) -> Dict[str, Any]:
-    soup = BeautifulSoup(html or "", "html.parser")
-    data: Dict[str, Any] = {}
-    for element in soup.find_all(attrs={"data-singular-name": True}):
-        name = element.get("data-singular-name")
-        if not name:
-            continue
-        value = (
-            element.get("data-singular-value")
-            or element.get("data-value")
-            or element.get_text(strip=True)
-        )
-        data[name] = value
+def _flatten_overlay_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
+    flat: Dict[str, Any] = {}
 
-    if "PlayerA" not in data or "PlayerB" not in data:
-        raise ValueError("Brak wymaganych danych graczy w źródle HTML")
+    def _normalize(value: Any) -> Any:
+        if isinstance(value, dict):
+            if "value" in value:
+                return _normalize(value["value"])
+            if "Value" in value:
+                return _normalize(value["Value"])
+        return value
 
-    return data
+    def _walk(obj: Any) -> None:
+        if not isinstance(obj, dict):
+            return
+
+        for key, value in obj.items():
+            normalized = _normalize(value)
+            if isinstance(normalized, dict):
+                _walk(normalized)
+            else:
+                flat[key] = normalized
+
+            if isinstance(value, dict):
+                _walk(value)
+
+    _walk(payload)
+    return flat
+
+
+def parse_overlay_json(payload: Dict[str, Any]) -> Dict[str, Any]:
+    if not isinstance(payload, dict):
+        raise ValueError("Niepoprawna struktura JSON – oczekiwano obiektu")
+
+    normalized = _flatten_overlay_payload(payload)
+
+    if "PlayerA" not in normalized or "PlayerB" not in normalized:
+        raise ValueError("Brak wymaganych danych graczy w źródle JSON")
+
+    players = _extract_players(normalized)
+    serving = _detect_server(normalized)
+
+    return {
+        "players": players,
+        "serving": serving,
+        "raw": normalized,
+    }
 
 
 def _extract_players(data: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
@@ -241,7 +280,13 @@ def update_snapshot_for_kort(
     session: Optional[requests.sessions.Session] = None,
 ) -> Dict[str, Any]:
     ensure_snapshot_entry(kort_id)
-    output_url = build_output_url(control_url)
+    try:
+        output_url = build_output_url(control_url)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "Nie udało się zbudować adresu API dla kortu %s: %s", kort_id, exc
+        )
+        return _mark_unavailable(kort_id, error=str(exc))
     http = session or requests
     try:
         response = http.get(output_url, timeout=REQUEST_TIMEOUT_SECONDS)
@@ -251,15 +296,23 @@ def update_snapshot_for_kort(
         return _mark_unavailable(kort_id, error=str(exc))
 
     try:
-        data = parse_overlay_html(response.text)
+        payload = response.json()
+    except ValueError as exc:
+        logger.warning(
+            "Nie udało się zdekodować JSON dla kortu %s: %s", kort_id, exc
+        )
+        return _mark_unavailable(kort_id, error=str(exc))
+
+    try:
+        parsed = parse_overlay_json(payload)
     except Exception as exc:  # noqa: BLE001
         logger.warning(
             "Nie udało się przeparsować danych dla kortu %s: %s", kort_id, exc
         )
         return _mark_unavailable(kort_id, error=str(exc))
 
-    players = _extract_players(data)
-    serving = _detect_server(data)
+    players = parsed["players"]
+    serving = parsed["serving"]
 
     payload = {
         "kort_id": str(kort_id),
@@ -272,7 +325,7 @@ def update_snapshot_for_kort(
             }
             for suffix, info in players.items()
         },
-        "raw": data,
+        "raw": parsed["raw"],
         "serving": serving,
         "error": None,
     }
@@ -373,7 +426,7 @@ __all__ = [
     "SNAPSHOT_STATUS_UNAVAILABLE",
     "build_output_url",
     "ensure_snapshot_entry",
-    "parse_overlay_html",
+    "parse_overlay_json",
     "snapshots",
     "start_background_updater",
     "update_snapshot_for_kort",

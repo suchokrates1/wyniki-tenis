@@ -1,5 +1,6 @@
+from html.parser import HTMLParser
+
 import pytest
-from bs4 import BeautifulSoup
 
 from main import (
     CORNERS,
@@ -12,6 +13,52 @@ from main import (
     save_config,
     OverlayConfig,
 )
+
+
+class StartTagCollector(HTMLParser):
+    def __init__(self):
+        super().__init__()
+        self.tags = []
+
+    def handle_starttag(self, tag, attrs):
+        self.tags.append((tag, dict(attrs)))
+
+
+def collect_start_tags(html: str):
+    parser = StartTagCollector()
+    parser.feed(html)
+    return parser.tags
+
+
+def _attr_matches(attrs, key, expected):
+    actual = attrs.get(key)
+    if actual is None:
+        return False
+    if key == "class":
+        classes = actual.split()
+        if isinstance(expected, str):
+            return expected in classes
+        return all(item in classes for item in expected)
+    return actual == expected
+
+
+def find_first_tag(tags, tag_name, **expected_attrs):
+    for tag, attrs in tags:
+        if tag != tag_name:
+            continue
+        if all(_attr_matches(attrs, key, value) for key, value in expected_attrs.items()):
+            return attrs
+    return None
+
+
+def find_all_tags(tags, tag_name, **expected_attrs):
+    found = []
+    for tag, attrs in tags:
+        if tag != tag_name:
+            continue
+        if all(_attr_matches(attrs, key, value) for key, value in expected_attrs.items()):
+            found.append(attrs)
+    return found
 
 
 @pytest.fixture
@@ -125,8 +172,8 @@ def test_config_preview_uses_comma_decimal_values_in_styles(authorized_client):
 
     assert response.status_code == 200
 
-    soup = BeautifulSoup(response.get_data(as_text=True), "html.parser")
-    card = soup.select_one('[data-preview-stage="all"] [data-corner="top_left"]')
+    tags = collect_start_tags(response.get_data(as_text=True))
+    card = find_first_tag(tags, "div", **{"data-corner": "top_left"})
     assert card is not None
 
     style = card.get("style", "")
@@ -150,8 +197,10 @@ def test_config_preview_uses_comma_decimal_values_in_styles(authorized_client):
     overlay_response = authorized_client.get("/kort/all")
     assert overlay_response.status_code == 200
 
-    overlay_soup = BeautifulSoup(overlay_response.get_data(as_text=True), "html.parser")
-    top_left_container = overlay_soup.select_one('[data-position="top-left"]')
+    overlay_tags = collect_start_tags(overlay_response.get_data(as_text=True))
+    top_left_container = find_first_tag(
+        overlay_tags, "div", **{"data-position": "top-left"}
+    )
     assert top_left_container is not None
 
     container_style = top_left_container.get("style", "")
@@ -161,10 +210,12 @@ def test_config_preview_uses_comma_decimal_values_in_styles(authorized_client):
     assert container_width == pytest.approx(640 * 1.25)
     assert container_height == pytest.approx(200 * 1.25)
 
-    iframe = top_left_container.select_one("iframe.kort-frame")
-    assert iframe is not None
-    iframe_style = iframe.get("style", "")
-    assert "scale(1.25)" in iframe_style
+    iframe_candidates = find_all_tags(
+        overlay_tags, "iframe", **{"class": "kort-frame"}
+    )
+    assert iframe_candidates
+    iframe_styles = [attrs.get("style", "") for attrs in iframe_candidates]
+    assert any("scale(1.25)" in style for style in iframe_styles)
 
 
 def test_as_float_supports_dot_and_comma_decimal_separators():
