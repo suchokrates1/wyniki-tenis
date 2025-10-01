@@ -3,6 +3,7 @@ import json
 import pytest
 import requests
 from requests import RequestException
+from urllib.parse import parse_qs, urlparse
 
 from main import app
 import results as results_module
@@ -13,7 +14,7 @@ from results import (
     snapshots,
     update_snapshot_for_kort,
 )
-from results_state_machine import CourtPhase, STATE_INTERVALS
+from results_state_machine import CourtPhase
 
 
 # --- Fixtures -----------------------------------------------------------------
@@ -119,6 +120,25 @@ class FailingSession:
         raise self._exc
 
 
+class CommandSession:
+    def __init__(self, responses: dict[str, dict]):
+        self._responses = responses
+        self.requested_urls: list[str] = []
+        self.requested_commands: list[str] = []
+
+    def get(self, url: str, timeout: int):
+        self.requested_urls.append(url)
+        parsed = urlparse(url)
+        command = parse_qs(parsed.query).get("command", [None])[0]
+        if command is None:
+            raise AssertionError("command parameter required")
+        self.requested_commands.append(command)
+        payload = self._responses.get(command)
+        if payload is None:
+            raise AssertionError(f"unexpected command {command}")
+        return DummyResponse(payload)
+
+
 # --- Testy logiki parsera/snapshotów -----------------------------------------
 
 def test_build_output_url_extracts_identifier():
@@ -190,96 +210,63 @@ def test_update_snapshot_marks_court_unavailable_on_parse_error(caplog):
     assert "kortu 3" in caplog.text
 
 
-def test_finished_state_archiving_and_reset(monkeypatch):
+def test_update_once_cycles_commands_and_transitions(monkeypatch):
     snapshots.clear()
     results_module.court_states.clear()
 
-    overlay_links = {"1": {"control": "https://example.com/control/live"}}
+    overlay_links = {"1": {"control": "https://app.overlays.uno/control/abc123"}}
 
     def supplier():
         return overlay_links
 
-    sequence = [
-        {
-            "kort_id": "1",
-            "status": SNAPSHOT_STATUS_OK,
-            "last_updated": "t0",
-            "players": {
-                "A": {"name": "Player One", "points": None, "sets": {}},
-                "B": {"name": "Player Two", "points": None, "sets": {}},
-            },
-            "raw": {},
-            "serving": None,
-            "error": None,
-        },
-        {
-            "kort_id": "1",
-            "status": SNAPSHOT_STATUS_OK,
-            "last_updated": "t1",
-            "players": {
-                "A": {"name": "Player One", "points": "", "sets": {"Set1PlayerA": "6"}},
-                "B": {"name": "Player Two", "points": "", "sets": {"Set1PlayerB": "4"}},
-            },
-            "raw": {"ScoreMatchStatus": "Finished"},
-            "serving": None,
-            "error": None,
-        },
-        {
-            "kort_id": "1",
-            "status": SNAPSHOT_STATUS_OK,
-            "last_updated": "t2",
-            "players": {
-                "A": {"name": "New Player", "points": None, "sets": {}},
-                "B": {"name": "Player Two", "points": None, "sets": {}},
-            },
-            "raw": {"ScoreMatchStatus": "Finished"},
-            "serving": None,
-            "error": None,
-        },
+    responses = {
+        "GetPlayerNameA": {"PlayerA": {"Value": "Anna"}},
+        "GetPlayerNameB": {"PlayerB": {"Value": "Bella"}},
+        "GetMatchStatus": {"MatchStatus": {"Value": "live"}},
+        "GetPointsPlayerA": {"PointsPlayerA": {"Value": "15"}},
+        "GetPointsPlayerB": {"PointsPlayerB": {"Value": "30"}},
+        "GetServePlayerA": {"ServePlayerA": {"Value": "true"}},
+        "GetServePlayerB": {"ServePlayerB": {"Value": "false"}},
+    }
+
+    session = CommandSession(responses)
+
+    expected_sequence = [
+        "GetPlayerNameA",
+        "GetPlayerNameB",
+        "GetMatchStatus",
+        "GetPointsPlayerA",
+        "GetPointsPlayerB",
+        "GetServePlayerA",
+        "GetServePlayerB",
     ]
 
-    call_log = []
+    now = 0.0
+    for expected_command in expected_sequence:
+        results_module._update_once(app, supplier, session=session, now=now)
+        assert session.requested_commands[-1] == expected_command
+        state = results_module.court_states["1"]
+        now = state.next_poll
 
-    def fake_update(kort_id, control_url, session=None):
-        call_log.append((kort_id, control_url))
-        snapshot = copy.deepcopy(sequence.pop(0))
-        entry = results_module.ensure_snapshot_entry(kort_id)
-        with results_module.snapshots_lock:
-            archive = entry.get("archive", [])
-            entry.update(snapshot)
-            entry["archive"] = archive
-            stored = copy.deepcopy(entry)
-        return stored
-
-    monkeypatch.setattr(results_module, "update_snapshot_for_kort", fake_update)
-
-    results_module._update_once(app, supplier, now=0.0)
+    snapshot = copy.deepcopy(snapshots["1"])
+    assert snapshot["status"] == SNAPSHOT_STATUS_OK
+    assert snapshot["players"]["A"]["name"] == "Anna"
+    assert snapshot["players"]["B"]["points"] == "30"
+    assert snapshot["serving"] == "A"
+    assert snapshot["raw"]["PointsPlayerA"] == "15"
 
     state = results_module.court_states["1"]
-    assert state.phase == CourtPhase.PRE_START
-    assert pytest.approx(state.next_poll, rel=1e-6) == STATE_INTERVALS[CourtPhase.PRE_START]
-    assert len(call_log) == 1
+    assert state.phase == CourtPhase.LIVE_POINTS
 
-    results_module._update_once(app, supplier, now=state.next_poll)
+    responses["GetMatchStatus"] = {"ScoreMatchStatus": {"Value": "Finished"}}
+
+    results_module._update_once(app, supplier, session=session, now=state.next_poll)
+    assert session.requested_commands[-1] == "GetMatchStatus"
+
     state = results_module.court_states["1"]
     assert state.phase == CourtPhase.FINISHED
-    archive = snapshots["1"].get("archive")
-    assert archive and len(archive) == 1
-    expected_next = state.last_polled + STATE_INTERVALS[CourtPhase.FINISHED] + state.phase_offset
-    assert pytest.approx(state.next_poll, rel=1e-6) == expected_next
-    assert len(call_log) == 2
-
-    results_module._update_once(app, supplier, now=expected_next - 1)
-    assert len(call_log) == 2
-
-    results_module._update_once(app, supplier, now=expected_next)
-    state = results_module.court_states["1"]
-    assert state.phase == CourtPhase.IDLE_NAMES
-    assert state.next_poll == expected_next
-    assert len(call_log) == 3
-    assert snapshots["1"]["players"]["A"]["name"] == "New Player"
-    assert len(snapshots["1"].get("archive") or []) == 1
-    assert not sequence
+    archive = snapshots["1"].get("archive") or []
+    assert len(archive) == 1
 
 
 def test_update_snapshot_marks_court_unavailable_on_json_decode_error(caplog):

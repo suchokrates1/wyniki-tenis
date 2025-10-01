@@ -3,8 +3,8 @@ import logging
 import threading
 import time
 from datetime import datetime, timezone
-from typing import Any, Callable, Dict, Optional
-from urllib.parse import urlparse
+from typing import Any, Callable, Dict, List, Optional
+from urllib.parse import quote_plus, urlparse
 
 import requests
 
@@ -18,6 +18,89 @@ SNAPSHOT_STATUS_OK = "ok"
 
 UPDATE_INTERVAL_SECONDS = 2
 REQUEST_TIMEOUT_SECONDS = 5
+NAME_STABILIZATION_TICKS = 12
+
+
+CommandPlanEntry = Dict[str, Any]
+
+
+COMMAND_PLAN: Dict[CourtPhase, List[CommandPlanEntry]] = {
+    CourtPhase.IDLE_NAMES: [
+        {
+            "command": "GetPlayerName{player}",
+            "players": ("A", "B"),
+            "stabilize": True,
+        },
+        {"command": "GetMatchStatus"},
+    ],
+    CourtPhase.PRE_START: [
+        {"command": "GetMatchStatus"},
+        {
+            "command": "GetPlayerName{player}",
+            "players": ("A", "B"),
+            "stabilize": True,
+        },
+    ],
+    CourtPhase.LIVE_POINTS: [
+        {"command": "GetPointsPlayer{player}", "players": ("A", "B")},
+        {"command": "GetServePlayer{player}", "players": ("A", "B")},
+        {"command": "GetMatchStatus"},
+        {
+            "command": "GetPlayerName{player}",
+            "players": ("A", "B"),
+            "stabilize": True,
+        },
+    ],
+    CourtPhase.LIVE_GAMES: [
+        {"command": "GetPointsPlayer{player}", "players": ("A", "B")},
+        {"command": "GetServePlayer{player}", "players": ("A", "B")},
+        {"command": "GetMatchStatus"},
+        {
+            "command": "GetPlayerName{player}",
+            "players": ("A", "B"),
+            "stabilize": True,
+        },
+    ],
+    CourtPhase.LIVE_SETS: [
+        {"command": "GetPointsPlayer{player}", "players": ("A", "B")},
+        {"command": "GetServePlayer{player}", "players": ("A", "B")},
+        {"command": "GetMatchStatus"},
+        {"command": "GetSetsPlayer{player}", "players": ("A", "B")},
+        {
+            "command": "GetPlayerName{player}",
+            "players": ("A", "B"),
+            "stabilize": True,
+        },
+    ],
+    CourtPhase.TIEBREAK7: [
+        {"command": "GetPointsPlayer{player}", "players": ("A", "B")},
+        {"command": "GetServePlayer{player}", "players": ("A", "B")},
+        {"command": "GetMatchStatus"},
+        {
+            "command": "GetPlayerName{player}",
+            "players": ("A", "B"),
+            "stabilize": True,
+        },
+    ],
+    CourtPhase.SUPER_TB10: [
+        {"command": "GetPointsPlayer{player}", "players": ("A", "B")},
+        {"command": "GetServePlayer{player}", "players": ("A", "B")},
+        {"command": "GetMatchStatus"},
+        {
+            "command": "GetPlayerName{player}",
+            "players": ("A", "B"),
+            "stabilize": True,
+        },
+    ],
+    CourtPhase.FINISHED: [
+        {"command": "GetMatchStatus"},
+        {
+            "command": "GetPlayerName{player}",
+            "players": ("A", "B"),
+            "stabilize": True,
+        },
+    ],
+}
 
 snapshots_lock = threading.Lock()
 snapshots: Dict[str, Dict[str, Any]] = {}
@@ -63,6 +146,66 @@ def ensure_snapshot_entry(kort_id: str) -> Dict[str, Any]:
             },
         )
     return entry
+
+
+def _order_players(players: tuple[str, ...], start: str) -> List[str]:
+    if not players:
+        return []
+    if start in players:
+        start_index = players.index(start)
+    else:
+        start_index = 0
+    ordered = list(players[start_index:]) + list(players[:start_index])
+    return ordered
+
+
+def _select_command(state: CourtState) -> Optional[str]:
+    plan = COMMAND_PLAN.get(state.phase) or []
+    if not plan:
+        return None
+
+    plan_length = len(plan)
+
+    if state.pending_players:
+        entry = plan[state.command_index % plan_length]
+        player = state.pending_players.pop(0)
+        command_template: str = entry["command"]
+        command = command_template.format(player=player)
+        if state.pending_players:
+            state.next_player = state.pending_players[0]
+        else:
+            players = entry.get("players") or ()
+            if players:
+                try:
+                    idx = players.index(player)
+                except ValueError:
+                    idx = 0
+                next_idx = (idx + 1) % len(players)
+                state.next_player = players[next_idx]
+            state.command_index = (state.command_index + 1) % plan_length
+        return command
+
+    attempts = 0
+    while attempts < plan_length:
+        entry = plan[state.command_index % plan_length]
+        players = entry.get("players") or ()
+        if entry.get("stabilize") and players:
+            if state.tick_counter % NAME_STABILIZATION_TICKS != 0:
+                state.command_index = (state.command_index + 1) % plan_length
+                attempts += 1
+                continue
+        if players:
+            ordered = _order_players(players, state.next_player)
+            if not ordered:
+                state.command_index = (state.command_index + 1) % plan_length
+                attempts += 1
+                continue
+            state.pending_players = ordered
+            return _select_command(state)
+        command = entry["command"]
+        state.command_index = (state.command_index + 1) % plan_length
+        return command
+    return None
 
 
 def _flatten_overlay_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
@@ -150,6 +293,61 @@ def _ensure_court_state(kort_id: str) -> CourtState:
         return state
 
 
+def _merge_partial_payload(kort_id: str, partial: Dict[str, Any]) -> Dict[str, Any]:
+    entry = ensure_snapshot_entry(kort_id)
+    with snapshots_lock:
+        raw = dict(entry.get("raw") or {})
+        raw.update(partial)
+        entry["raw"] = raw
+        entry["kort_id"] = str(kort_id)
+        entry.setdefault("players", {})
+        entry.setdefault("archive", entry.get("archive", []))
+        entry.setdefault("status", SNAPSHOT_STATUS_NO_DATA)
+        entry.setdefault("serving", None)
+        entry["last_updated"] = _now_iso()
+        entry["error"] = None
+
+        if "PlayerA" in raw and "PlayerB" in raw:
+            try:
+                parsed = parse_overlay_json(raw)
+            except Exception:  # noqa: BLE001
+                snapshots[str(kort_id)] = entry
+                return copy.deepcopy(entry)
+
+            players = parsed["players"]
+            serving = parsed["serving"]
+            entry.update(
+                {
+                    "status": SNAPSHOT_STATUS_OK,
+                    "players": {
+                        suffix: {
+                            **info,
+                            "is_serving": serving == suffix,
+                        }
+                        for suffix, info in players.items()
+                    },
+                    "serving": serving,
+                }
+            )
+
+        snapshots[str(kort_id)] = entry
+        snapshot = copy.deepcopy(entry)
+    return snapshot
+
+
+def _handle_command_error(kort_id: str, error: str) -> Dict[str, Any]:
+    entry = ensure_snapshot_entry(kort_id)
+    with snapshots_lock:
+        entry["error"] = error
+        entry.setdefault("status", SNAPSHOT_STATUS_NO_DATA)
+        entry.setdefault("players", {})
+        entry.setdefault("raw", {})
+        entry.setdefault("archive", entry.get("archive", []))
+        entry["last_updated"] = _now_iso()
+        snapshot = copy.deepcopy(entry)
+    return snapshot
+
+
 def _archive_snapshot(kort_id: str, snapshot: Dict[str, Any]) -> Dict[str, Any]:
     archive_entry = {
         "kort_id": snapshot.get("kort_id"),
@@ -213,12 +411,15 @@ def _classify_phase(snapshot: Dict[str, Any], state: CourtState) -> CourtPhase:
     if _is_truthy(raw.get("TieBreak")) or raw_status == "tiebreak":
         return CourtPhase.TIEBREAK7
 
+    if raw_status in {"live", "playing", "in_progress", "progress"}:
+        return CourtPhase.LIVE_POINTS
+
     players = snapshot.get("players") or {}
-    has_points = any(
+    points_ready = all(
         (players.get(suffix) or {}).get("points") not in (None, "")
         for suffix in ("A", "B")
     )
-    if has_points:
+    if points_ready:
         return CourtPhase.LIVE_POINTS
 
     set_counts = [
@@ -382,8 +583,47 @@ def _update_once(
             continue
         if state.next_poll and current_time < state.next_poll:
             continue
-        snapshot = update_snapshot_for_kort(kort_id, control_url, session=session)
+
+        command = _select_command(state)
+        if not command:
+            state.tick_counter += 1
+            state.mark_polled(current_time)
+            state.schedule_next(current_time)
+            continue
+
+        try:
+            base_url = build_output_url(control_url)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "Nie udało się przygotować adresu dla kortu %s: %s", kort_id, exc
+            )
+            snapshot = _handle_command_error(kort_id, error=str(exc))
+            _process_snapshot(state, snapshot, current_time)
+            state.tick_counter += 1
+            continue
+
+        command_url = f"{base_url}?command={quote_plus(command)}"
+        http = session or requests
+        try:
+            response = http.get(command_url, timeout=REQUEST_TIMEOUT_SECONDS)
+            response.raise_for_status()
+            payload = response.json()
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "Nie udało się pobrać komendy %s dla kortu %s: %s",
+                command,
+                kort_id,
+                exc,
+            )
+            snapshot = _handle_command_error(kort_id, error=str(exc))
+            _process_snapshot(state, snapshot, current_time)
+            state.tick_counter += 1
+            continue
+
+        flattened = _flatten_overlay_payload(payload)
+        snapshot = _merge_partial_payload(kort_id, flattened)
         _process_snapshot(state, snapshot, current_time)
+        state.tick_counter += 1
 
 
 _thread: Optional[threading.Thread] = None
@@ -421,6 +661,7 @@ def start_background_updater(
 
 
 __all__ = [
+    "COMMAND_PLAN",
     "SNAPSHOT_STATUS_NO_DATA",
     "SNAPSHOT_STATUS_OK",
     "SNAPSHOT_STATUS_UNAVAILABLE",
