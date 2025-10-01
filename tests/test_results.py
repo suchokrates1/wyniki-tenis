@@ -8,6 +8,7 @@ from requests import RequestException
 from main import app
 import results as results_module
 from results import (
+    SNAPSHOT_STATUS_NO_DATA,
     SNAPSHOT_STATUS_OK,
     SNAPSHOT_STATUS_UNAVAILABLE,
     build_output_url,
@@ -185,69 +186,23 @@ def test_build_output_url_extracts_identifier():
     )
 
 
-def test_update_snapshot_for_kort_parses_players_and_serving():
-    payload = {
-        "data": {
-            "PlayerA": {"value": "Player One"},
-            "PlayerB": {"value": "Player Two"},
-            "PointsPlayerA": {"value": "15"},
-            "PointsPlayerB": {"value": "30"},
-            "Set1PlayerA": {"value": "6"},
-            "Set1PlayerB": {"value": "4"},
-            "ServePlayerA": {"value": "true"},
-            "ServePlayerB": {"value": "false"},
-        }
-    }
-    response = DummyResponse(payload)
-    session = DummySession(response)
+def test_update_snapshot_for_kort_initializes_entry_without_requests():
+    snapshots.clear()
+    session = DummySession(DummyResponse({}))
 
     snapshot = update_snapshot_for_kort(
         "1", "https://example.com/control/live", session=session
     )
 
-    assert snapshot["status"] == SNAPSHOT_STATUS_OK
-    assert snapshot["players"]["A"]["name"] == "Player One"
-    assert snapshot["players"]["B"]["points"] == "30"
-    assert snapshot["players"]["A"]["sets"] == {"Set1PlayerA": "6"}
-    assert snapshot["players"]["A"]["is_serving"] is True
-    assert snapshot["players"]["B"]["is_serving"] is False
+    assert snapshot["status"] == SNAPSHOT_STATUS_NO_DATA
+    assert snapshot["players"] == {}
+    assert snapshot["raw"] == {}
+    assert snapshot["serving"] is None
+    assert snapshot["error"] is None
     assert snapshot.get("archive") == []
+    assert snapshot["last_updated"] is None
     assert snapshots["1"] == snapshot
-    assert session.requests[0]["method"] == "PUT"
-    assert (
-        session.requests[0]["url"]
-        == "https://app.overlays.uno/apiv2/controlapps/live/api"
-    )
-    assert session.requests[0]["json"] == {
-        "command": results_module.FULL_SNAPSHOT_COMMAND
-    }
-
-
-def test_update_snapshot_marks_court_unavailable_on_network_error(caplog):
-    session = FailingSession(RequestException("boom"))
-
-    snapshot = update_snapshot_for_kort(
-        "2", "https://example.com/control/live", session=session
-    )
-
-    assert snapshot["status"] == SNAPSHOT_STATUS_UNAVAILABLE
-    assert snapshot["error"]
-    assert "boom" in snapshot["error"]
-    assert "kortu 2" in caplog.text
-
-
-def test_update_snapshot_marks_court_unavailable_on_parse_error(caplog):
-    payload = {"PlayerA": "Solo"}
-    response = DummyResponse(payload)
-    session = DummySession(response)
-
-    snapshot = update_snapshot_for_kort(
-        "3", "https://example.com/control/live", session=session
-    )
-
-    assert snapshot["status"] == SNAPSHOT_STATUS_UNAVAILABLE
-    assert snapshot["error"]
-    assert "kortu 3" in caplog.text
+    assert session.requests == []
 
 
 def test_update_once_cycles_commands_and_transitions(monkeypatch):
@@ -792,15 +747,3 @@ def test_update_once_does_not_retry_on_400(monkeypatch):
     assert snapshot["status"] == SNAPSHOT_STATUS_UNAVAILABLE
     assert "HTTP 400" in snapshot["error"]
 
-
-def test_update_snapshot_marks_court_unavailable_on_json_decode_error(caplog):
-    response = DummyResponse(None, json_error=ValueError("invalid json"))
-    session = DummySession(response)
-
-    snapshot = update_snapshot_for_kort(
-        "4", "https://example.com/control/live", session=session
-    )
-
-    assert snapshot["status"] == SNAPSHOT_STATUS_UNAVAILABLE
-    assert snapshot["error"]
-    assert "kortu 4" in caplog.text
