@@ -3,6 +3,7 @@ import json
 import pytest
 import requests
 from requests import RequestException
+from urllib.parse import parse_qs, urlparse
 
 from main import app
 import results as results_module
@@ -155,7 +156,7 @@ def test_update_snapshot_for_kort_parses_players_and_serving():
     assert snapshot["players"]["A"]["sets"] == {"Set1PlayerA": "6"}
     assert snapshot["players"]["A"]["is_serving"] is True
     assert snapshot["players"]["B"]["is_serving"] is False
-    assert snapshot["archive"] == []
+    assert snapshot.get("archive") == []
     assert snapshots["1"] == snapshot
     assert (
         session.requested_urls[0][0]
@@ -190,15 +191,16 @@ def test_update_snapshot_marks_court_unavailable_on_parse_error(caplog):
     assert "kortu 3" in caplog.text
 
 
-def test_finished_state_archiving_and_reset(monkeypatch):
+def test_update_once_cycles_commands_and_transitions(monkeypatch):
     snapshots.clear()
     results_module.court_states.clear()
 
-    overlay_links = {"1": {"control": "https://example.com/control/live"}}
+    overlay_links = {"1": {"control": "https://app.overlays.uno/control/abc123"}}
 
     def supplier():
         return overlay_links
 
+    # Scenariusz czasowy: IDLE (0-29s) -> LIVE (30-59s) -> FINISHED (60-119s) -> reset nazwisk (>=120s)
     idle_snapshot = {
         "kort_id": "1",
         "status": SNAPSHOT_STATUS_OK,
@@ -216,16 +218,8 @@ def test_finished_state_archiving_and_reset(monkeypatch):
         "status": SNAPSHOT_STATUS_OK,
         "last_updated": "live",
         "players": {
-            "A": {
-                "name": "Player One",
-                "points": "",
-                "sets": {"Set1PlayerA": "6"},
-            },
-            "B": {
-                "name": "Player Two",
-                "points": "",
-                "sets": {"Set1PlayerB": "4"},
-            },
+                "A": {"name": "Player One", "points": "", "sets": {"Set1PlayerA": "6"}},
+                "B": {"name": "Player Two", "points": "", "sets": {"Set1PlayerB": "4"}},
         },
         "raw": {"ScoreMatchStatus": "Live"},
         "serving": None,
