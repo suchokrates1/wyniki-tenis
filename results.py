@@ -403,6 +403,7 @@ def ensure_snapshot_entry(kort_id: str) -> Dict[str, Any]:
                 "raw": {},
                 "serving": None,
                 "error": None,
+                "available": False,
                 "archive": [],
             },
         )
@@ -553,6 +554,45 @@ def _flatten_overlay_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
     return flat
 
 
+def _interpret_visibility_value(value: Any) -> Optional[bool]:
+    if isinstance(value, bool):
+        return value
+
+    if isinstance(value, (int, float)):
+        return bool(value)
+
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in {"1", "true", "yes", "on", "tak", "visible", "show"}:
+            return True
+        if normalized in {"0", "false", "no", "off", "nie", "hidden", "hide"}:
+            return False
+        return None
+
+    if isinstance(value, dict):
+        for key in ("value", "Value", "visibility", "Visibility"):
+            if key in value:
+                interpreted = _interpret_visibility_value(value[key])
+                if interpreted is not None:
+                    return interpreted
+        return None
+
+    return None
+
+
+def _detect_overlay_visibility(data: Dict[str, Any]) -> Optional[bool]:
+    for key, value in data.items():
+        key_text = str(key).lower()
+        if "overlay" not in key_text:
+            continue
+        if "visibility" not in key_text and key_text != "overlayvisible":
+            continue
+        interpreted = _interpret_visibility_value(value)
+        if interpreted is not None:
+            return interpreted
+    return None
+
+
 def parse_overlay_json(payload: Dict[str, Any]) -> Dict[str, Any]:
     if not isinstance(payload, dict):
         raise ValueError("Niepoprawna struktura JSON – oczekiwano obiektu")
@@ -561,10 +601,12 @@ def parse_overlay_json(payload: Dict[str, Any]) -> Dict[str, Any]:
 
     players = _extract_players(normalized)
     serving = _detect_server(normalized)
+    available = _detect_overlay_visibility(normalized)
 
     return {
         "players": players,
         "serving": serving,
+        "available": available,
         "raw": normalized,
     }
 
@@ -658,17 +700,21 @@ def _merge_partial_payload(kort_id: str, partial: Dict[str, Any]) -> Dict[str, A
         entry.setdefault("archive", entry.get("archive", []))
         entry.setdefault("status", SNAPSHOT_STATUS_NO_DATA)
         entry.setdefault("serving", None)
+        entry.setdefault("available", False)
         entry["last_updated"] = _now_iso()
         entry["error"] = None
 
         try:
             parsed = parse_overlay_json(raw)
         except Exception:  # noqa: BLE001
+            entry["available"] = False
             snapshots[str(kort_id)] = entry
             return copy.deepcopy(entry)
 
         players = parsed["players"]
         serving = parsed["serving"]
+        available_value = parsed.get("available")
+        entry["available"] = bool(available_value) if available_value is not None else False
 
         def _has_player_info(info: Any) -> bool:
             if not isinstance(info, dict):
@@ -733,6 +779,7 @@ def _handle_command_error(kort_id: str, error: str) -> Dict[str, Any]:
         entry.setdefault("raw", {})
         entry.setdefault("archive", entry.get("archive", []))
         entry["last_updated"] = _now_iso()
+        entry["available"] = False
         snapshot = copy.deepcopy(entry)
     return snapshot
 
@@ -915,6 +962,7 @@ def _mark_unavailable(kort_id: str, *, error: Optional[str]) -> Dict[str, Any]:
         "raw": {},
         "serving": None,
         "error": error,
+        "available": False,
     }
     entry = ensure_snapshot_entry(kort_id)
     with snapshots_lock:
