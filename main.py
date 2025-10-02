@@ -568,6 +568,75 @@ def overlay_links_api():
     return jsonify(link.to_dict()), 201
 
 
+@app.route("/api/overlay-links/reload", methods=["POST"])
+@requires_config_auth
+def overlay_links_reload():
+    db.create_all()
+
+    if not os.path.exists(LINKS_PATH):
+        return jsonify({"error": f"Brak pliku {LINKS_PATH}."}), 404
+
+    try:
+        with open(LINKS_PATH, "r", encoding="utf-8") as f:
+            data = json.load(f) or {}
+    except json.JSONDecodeError as exc:
+        logger.error("Nie udało się odczytać pliku %s: %s", LINKS_PATH, exc)
+        return jsonify({"error": "Plik overlay_links.json ma niepoprawny format JSON."}), 400
+
+    if not isinstance(data, dict):
+        return (
+            jsonify({"error": "Plik overlay_links.json musi zawierać obiekt z mapowaniem kortów."}),
+            400,
+        )
+
+    existing_links = {link.kort_id: link for link in OverlayLink.query.all()}
+    seen_ids = set()
+    created = 0
+    updated = 0
+    removed = 0
+
+    for kort_id, payload in data.items():
+        kort_id_str = str(kort_id)
+        seen_ids.add(kort_id_str)
+        payload = payload or {}
+        overlay_valid, overlay_error = validate_overlay_url(payload.get("overlay"))
+        control_valid, control_error = validate_control_url(payload.get("control"))
+
+        if overlay_error or control_error:
+            logger.warning(
+                "Pominięto link dla kortu %s - %s %s",
+                kort_id_str,
+                overlay_error or "",
+                control_error or "",
+            )
+            continue
+
+        existing = existing_links.get(kort_id_str)
+        if existing is not None:
+            if existing.overlay_url != overlay_valid or existing.control_url != control_valid:
+                existing.overlay_url = overlay_valid
+                existing.control_url = control_valid
+                updated += 1
+        else:
+            db.session.add(
+                OverlayLink(
+                    kort_id=kort_id_str,
+                    overlay_url=overlay_valid,
+                    control_url=control_valid,
+                )
+            )
+            created += 1
+
+    for kort_id, link in existing_links.items():
+        if kort_id not in seen_ids:
+            db.session.delete(link)
+            removed += 1
+
+    db.session.commit()
+
+    return jsonify({"created": created, "updated": updated, "removed": removed})
+
+
 @app.route("/api/overlay-links/<int:link_id>", methods=["GET", "PUT", "DELETE"])
 def overlay_link_detail_api(link_id):
     ensure_overlay_links_seeded()
