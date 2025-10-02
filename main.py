@@ -9,7 +9,7 @@ from functools import wraps
 from pathlib import Path
 from urllib.parse import urlparse
 
-from flask import Flask, jsonify, render_template, request, url_for
+from flask import Flask, flash, jsonify, render_template, request, url_for
 from flask_cors import CORS
 from flask_sqlalchemy import SQLAlchemy
 from dotenv import load_dotenv
@@ -52,6 +52,22 @@ db = SQLAlchemy(app)
 __all__ = ["app", "db", "snapshots"]
 
 CORNERS = ["top_left", "top_right", "bottom_left", "bottom_right"]
+
+ALLOWED_LABEL_POSITIONS = {
+    "top-left",
+    "top-center",
+    "top-right",
+    "bottom-left",
+    "bottom-center",
+    "bottom-right",
+}
+
+DIMENSION_MIN = 1
+DIMENSION_MAX = 4096
+DISPLAY_SCALE_MIN = 0.1
+DISPLAY_SCALE_MAX = 5.0
+OFFSET_MIN = -1000
+OFFSET_MAX = 1000
 
 CORNER_POSITION_STYLES = {
     "top_left": {"name": "top-left", "style": "top: 0; left: 0;"},
@@ -1091,35 +1107,258 @@ def config():
     if request.method == "POST":
         form = request.form
 
-        data = {
-            "view_width": as_int(form.get("view_width", current_config["view_width"]), current_config["view_width"]),
-            "view_height": as_int(form.get("view_height", current_config["view_height"]), current_config["view_height"]),
-            "display_scale": as_float(form.get("display_scale", current_config["display_scale"]), current_config["display_scale"]),
-            "left_offset": as_int(form.get("left_offset", current_config["left_offset"]), current_config["left_offset"]),
-            "label_position": form.get("label_position", current_config["label_position"]),
-        }
+        def parse_int_field(raw_value, *, current_value, label):
+            display_value = raw_value if raw_value is not None else current_value
+            if raw_value is None:
+                return current_value, None, display_value
 
-        kort_all = {}
+            if isinstance(raw_value, str):
+                stripped = raw_value.strip()
+                if stripped == "":
+                    return current_value, f"{label} nie może być puste.", display_value
+                normalized = stripped.replace(",", ".")
+            else:
+                normalized = raw_value
+
+            try:
+                if isinstance(normalized, str):
+                    if "." in normalized:
+                        value = int(float(normalized))
+                    else:
+                        value = int(normalized)
+                else:
+                    value = int(normalized)
+            except (TypeError, ValueError):
+                return current_value, f"{label} musi być liczbą całkowitą.", display_value
+
+            return value, None, value
+
+        def parse_float_field(raw_value, *, current_value, label):
+            display_value = raw_value if raw_value is not None else current_value
+            if raw_value is None:
+                return current_value, None, display_value
+
+            if isinstance(raw_value, str):
+                stripped = raw_value.strip()
+                if stripped == "":
+                    return current_value, f"{label} nie może być puste.", display_value
+                normalized = stripped.replace(",", ".")
+            else:
+                normalized = raw_value
+
+            try:
+                value = float(normalized)
+            except (TypeError, ValueError):
+                return current_value, f"{label} musi być liczbą.", display_value
+
+            return value, None, value
+
+        errors = []
+        submitted_config = copy.deepcopy(current_config)
+        validated_config = copy.deepcopy(current_config)
+
+        field_specs = [
+            ("view_width", "📐 Szerokość wycinka", DIMENSION_MIN, DIMENSION_MAX),
+            ("view_height", "📏 Wysokość wycinka", DIMENSION_MIN, DIMENSION_MAX),
+            ("left_offset", "↔️ Przesunięcie w lewo", OFFSET_MIN, OFFSET_MAX),
+        ]
+
+        for field, label, min_value, max_value in field_specs:
+            raw_value = form.get(field)
+            if raw_value is None:
+                continue
+
+            value, error, display_value = parse_int_field(
+                raw_value,
+                current_value=current_config[field],
+                label=label,
+            )
+            if error:
+                errors.append(error)
+                submitted_config[field] = display_value
+            else:
+                if value < min_value:
+                    errors.append(f"{label} musi być nie mniejsze niż {min_value}.")
+                    submitted_config[field] = raw_value
+                elif value > max_value:
+                    errors.append(f"{label} nie może być większe niż {max_value}.")
+                    submitted_config[field] = raw_value
+                else:
+                    validated_config[field] = value
+                    submitted_config[field] = value
+
+        raw_scale = form.get("display_scale")
+        if raw_scale is not None:
+            value, error, display_value = parse_float_field(
+                raw_scale,
+                current_value=current_config["display_scale"],
+                label="🔍 Skala wyświetlania",
+            )
+            if error:
+                errors.append(error)
+                submitted_config["display_scale"] = display_value
+            else:
+                if value < DISPLAY_SCALE_MIN or value > DISPLAY_SCALE_MAX:
+                    errors.append(
+                        f"🔍 Skala wyświetlania musi mieścić się w przedziale od {DISPLAY_SCALE_MIN} do {DISPLAY_SCALE_MAX}."
+                    )
+                    submitted_config["display_scale"] = raw_scale
+                else:
+                    validated_config["display_scale"] = value
+                    submitted_config["display_scale"] = value
+
+        raw_label_position = form.get("label_position")
+        if raw_label_position is not None:
+            if raw_label_position not in ALLOWED_LABEL_POSITIONS:
+                errors.append('📍 Pozycja napisu "Kort X" zawiera niedozwoloną wartość.')
+                submitted_config["label_position"] = raw_label_position
+            else:
+                validated_config["label_position"] = raw_label_position
+                submitted_config["label_position"] = raw_label_position
+
+        submitted_corners = submitted_config.setdefault("kort_all", {})
+        validated_corners = validated_config.setdefault("kort_all", {})
+
         for corner in CORNERS:
             existing_corner = current_config["kort_all"].get(corner, get_default_corner_config(corner))
+            submitted_corner = copy.deepcopy(existing_corner)
+            validated_corner = copy.deepcopy(existing_corner)
+
             prefix = f"kort_all[{corner}]"
             label_prefix = f"{prefix}[label]"
 
-            kort_all[corner] = {
-                "view_width": as_int(form.get(f"{prefix}[view_width]", existing_corner["view_width"]), existing_corner["view_width"]),
-                "view_height": as_int(form.get(f"{prefix}[view_height]", existing_corner["view_height"]), existing_corner["view_height"]),
-                "display_scale": as_float(form.get(f"{prefix}[display_scale]", existing_corner["display_scale"]), existing_corner["display_scale"]),
-                "offset_x": as_int(form.get(f"{prefix}[offset_x]", existing_corner["offset_x"]), existing_corner["offset_x"]),
-                "offset_y": as_int(form.get(f"{prefix}[offset_y]", existing_corner["offset_y"]), existing_corner["offset_y"]),
-                "label": {
-                    "position": form.get(f"{label_prefix}[position]", existing_corner["label"]["position"]),
-                    "offset_x": as_int(form.get(f"{label_prefix}[offset_x]", existing_corner["label"]["offset_x"]), existing_corner["label"]["offset_x"]),
-                    "offset_y": as_int(form.get(f"{label_prefix}[offset_y]", existing_corner["label"]["offset_y"]), existing_corner["label"]["offset_y"]),
-                },
-            }
+            dimension_fields = [
+                ("view_width", "Szerokość", DIMENSION_MIN, DIMENSION_MAX),
+                ("view_height", "Wysokość", DIMENSION_MIN, DIMENSION_MAX),
+            ]
 
-        data["kort_all"] = kort_all
-        saved_config = save_config(data)
+            for field, label, min_value, max_value in dimension_fields:
+                raw_value = form.get(f"{prefix}[{field}]")
+                if raw_value is None:
+                    continue
+
+                value, error, display_value = parse_int_field(
+                    raw_value,
+                    current_value=existing_corner[field],
+                    label=f"{CORNER_LABELS.get(corner, corner)} – {label}",
+                )
+                if error:
+                    errors.append(error)
+                    submitted_corner[field] = display_value
+                else:
+                    if value < min_value:
+                        errors.append(
+                            f"{CORNER_LABELS.get(corner, corner)} – {label} musi być nie mniejsze niż {min_value}."
+                        )
+                        submitted_corner[field] = raw_value
+                    elif value > max_value:
+                        errors.append(
+                            f"{CORNER_LABELS.get(corner, corner)} – {label} nie może być większe niż {max_value}."
+                        )
+                        submitted_corner[field] = raw_value
+                    else:
+                        validated_corner[field] = value
+                        submitted_corner[field] = value
+
+            raw_scale = form.get(f"{prefix}[display_scale]")
+            if raw_scale is not None:
+                value, error, display_value = parse_float_field(
+                    raw_scale,
+                    current_value=existing_corner["display_scale"],
+                    label=f"{CORNER_LABELS.get(corner, corner)} – Skala",
+                )
+                if error:
+                    errors.append(error)
+                    submitted_corner["display_scale"] = display_value
+                else:
+                    if value < DISPLAY_SCALE_MIN or value > DISPLAY_SCALE_MAX:
+                        errors.append(
+                            f"{CORNER_LABELS.get(corner, corner)} – Skala musi mieścić się w przedziale od {DISPLAY_SCALE_MIN} do {DISPLAY_SCALE_MAX}."
+                        )
+                        submitted_corner["display_scale"] = raw_scale
+                    else:
+                        validated_corner["display_scale"] = value
+                        submitted_corner["display_scale"] = value
+
+            for field, label in ("offset_x", "Offset X"), ("offset_y", "Offset Y"):
+                raw_value = form.get(f"{prefix}[{field}]")
+                if raw_value is None:
+                    continue
+
+                value, error, display_value = parse_int_field(
+                    raw_value,
+                    current_value=existing_corner[field],
+                    label=f"{CORNER_LABELS.get(corner, corner)} – {label}",
+                )
+                if error:
+                    errors.append(error)
+                    submitted_corner[field] = display_value
+                else:
+                    if value < OFFSET_MIN or value > OFFSET_MAX:
+                        errors.append(
+                            f"{CORNER_LABELS.get(corner, corner)} – {label} musi mieścić się w przedziale od {OFFSET_MIN} do {OFFSET_MAX}."
+                        )
+                        submitted_corner[field] = raw_value
+                    else:
+                        validated_corner[field] = value
+                        submitted_corner[field] = value
+
+            raw_label_position = form.get(f"{label_prefix}[position]")
+            if raw_label_position is not None:
+                if raw_label_position not in ALLOWED_LABEL_POSITIONS:
+                    errors.append(
+                        f"{CORNER_LABELS.get(corner, corner)} – Pozycja etykiety zawiera niedozwoloną wartość."
+                    )
+                    submitted_corner.setdefault("label", {})["position"] = raw_label_position
+                else:
+                    validated_corner.setdefault("label", {})["position"] = raw_label_position
+                    submitted_corner.setdefault("label", {})["position"] = raw_label_position
+
+            for field, label in ("offset_x", "Offset etykiety X"), ("offset_y", "Offset etykiety Y"):
+                raw_value = form.get(f"{label_prefix}[{field}]")
+                if raw_value is None:
+                    continue
+
+                value, error, display_value = parse_int_field(
+                    raw_value,
+                    current_value=existing_corner["label"][field],
+                    label=f"{CORNER_LABELS.get(corner, corner)} – {label}",
+                )
+                if error:
+                    errors.append(error)
+                    submitted_corner.setdefault("label", {})[field] = display_value
+                else:
+                    if value < OFFSET_MIN or value > OFFSET_MAX:
+                        errors.append(
+                            f"{CORNER_LABELS.get(corner, corner)} – {label} musi mieścić się w przedziale od {OFFSET_MIN} do {OFFSET_MAX}."
+                        )
+                        submitted_corner.setdefault("label", {})[field] = raw_value
+                    else:
+                        validated_corner.setdefault("label", {})[field] = value
+                        submitted_corner.setdefault("label", {})[field] = value
+
+            submitted_corners[corner] = submitted_corner
+            validated_corners[corner] = validated_corner
+
+        wants_json = request.is_json or (
+            request.accept_mimetypes.accept_json
+            and not request.accept_mimetypes.accept_html
+        )
+
+        if errors:
+            for error in errors:
+                flash(error, "error")
+
+            if wants_json:
+                return jsonify({"ok": False, "errors": errors}), 400
+
+            response = render_config(submitted_config)
+            return response, 400
+
+        saved_config = save_config(validated_config)
+
+        if wants_json:
+            return jsonify({"ok": True, "config": saved_config})
 
         return render_config(saved_config)
 
