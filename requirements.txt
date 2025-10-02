@@ -1,5 +1,5 @@
-flask
-flask-cors
-Flask-SQLAlchemy
-requests
-python-dotenv
+Flask==3.0.3
+flask-cors==4.0.1
+Flask-SQLAlchemy==3.1.1
+requests==2.32.3
+python-dotenv==1.0.1
