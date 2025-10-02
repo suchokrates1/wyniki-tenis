@@ -43,6 +43,8 @@ RETRY_JITTER_MAX_SECONDS = 0.3
 
 FULL_SNAPSHOT_COMMAND = None
 
+ARCHIVE_LIMIT = 50
+
 
 CommandPlanEntry = Dict[str, Any]
 
@@ -883,6 +885,8 @@ def _archive_snapshot(kort_id: str, snapshot: Dict[str, Any]) -> Dict[str, Any]:
     with snapshots_lock:
         history = entry.setdefault("archive", [])
         history.append(archive_entry)
+        if len(history) > ARCHIVE_LIMIT:
+            del history[:-ARCHIVE_LIMIT]
         entry["archive"] = history
         snapshots[str(kort_id)] = entry
     return archive_entry

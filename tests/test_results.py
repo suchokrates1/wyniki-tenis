@@ -372,6 +372,29 @@ def test_partial_updates_allow_state_progression():
     assert snapshot["last_updated"] is not None
 
 
+def test_archive_snapshot_capped_to_limit():
+    kort_id = "archive-limit"
+
+    for index in range(results_module.ARCHIVE_LIMIT + 10):
+        snapshot = {
+            "kort_id": kort_id,
+            "status": SNAPSHOT_STATUS_OK,
+            "last_updated": str(index),
+            "players": {},
+            "raw": {},
+            "serving": None,
+            "error": None,
+        }
+        results_module._archive_snapshot(kort_id, snapshot)
+
+    archive = results_module.snapshots[kort_id]["archive"]
+    assert len(archive) == results_module.ARCHIVE_LIMIT
+    assert [entry["last_updated"] for entry in archive] == [
+        str(index)
+        for index in range(10, results_module.ARCHIVE_LIMIT + 10)
+    ]
+
+
 def test_update_once_cycles_commands_and_transitions(monkeypatch):
     snapshots.clear()
     results_module.court_states.clear()
