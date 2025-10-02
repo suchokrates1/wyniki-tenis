@@ -75,10 +75,12 @@ def test_results_page_renders_data(client, snapshots_dir):
 
     assert response.status_code == 200
     assert "<table" in html
-    assert 'aria-live="polite"' in html
+    assert "section-active" in html
     assert "Kort Centralny" in html
     assert "▶" in html
-    assert "brak danych" in html.lower()
+    assert "Overlay: ON" in html
+    assert "Ostatnia aktualizacja:" in html
+    assert "Status: W trakcie" in html
 
 
 def test_results_page_shows_placeholder_for_finished_section(client, snapshots_dir):
@@ -88,6 +90,30 @@ def test_results_page_shows_placeholder_for_finished_section(client, snapshots_d
     assert response.status_code == 200
     assert "Brak zakończonych meczów do wyświetlenia." in html
     assert "Aktualne spotkania i status kortów" in html
+
+
+def test_results_page_marks_unavailable_with_notice(client, snapshots_dir):
+    sample_data = [
+        {
+            "kort_id": "3",
+            "kort": "Kort 3",
+            "status": "active",
+            "available": False,
+            "players": [
+                {"name": "E. Kowal", "sets": 0, "games": 0},
+                {"name": "F. Maj", "sets": 0, "games": 0},
+            ],
+        }
+    ]
+    (snapshots_dir / "latest.json").write_text(json.dumps(sample_data), encoding="utf-8")
+
+    response = client.get("/wyniki")
+    html = response.get_data(as_text=True)
+
+    assert response.status_code == 200
+    assert "Brak potwierdzonych aktywnych spotkań" in html
+    assert "Overlay: OFF" in html
+    assert "Status: Niedostępny" in html
 
 
 # --- Pomocnicze klasy do testów parsera --------------------------------------

@@ -44,12 +44,82 @@
       padding: 3px 8px;
       border-radius: 6px;
     }
+
+    .status-panel {
+      position: absolute;
+      top: 16px;
+      left: 16px;
+      z-index: 20;
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+      font-family: sans-serif;
+      color: #f8fafc;
+      text-shadow: 1px 1px 2px black;
+      background: rgba(0, 0, 0, 0.45);
+      padding: 8px 12px;
+      border-radius: 8px;
+    }
+
+    .status-pill {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.35rem;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      font-weight: 700;
+      font-size: 0.9rem;
+      padding: 0.25rem 0.75rem;
+      border-radius: 999px;
+      border: 1px solid transparent;
+      width: fit-content;
+    }
+
+    .status-on {
+      background: rgba(74, 222, 128, 0.18);
+      color: #4ade80;
+      border-color: rgba(74, 222, 128, 0.45);
+    }
+
+    .status-off {
+      background: rgba(239, 68, 68, 0.2);
+      color: #fca5a5;
+      border-color: rgba(239, 68, 68, 0.45);
+    }
+
+    .status-info {
+      font-size: 0.85rem;
+    }
+
+    .mini-meta {
+      margin-top: 4px;
+      display: flex;
+      flex-direction: column;
+      gap: 2px;
+      font-size: 12px;
+    }
+
+    .mini-meta time,
+    .mini-meta span {
+      display: block;
+    }
   </style>
 </head>
 <body>
 
   <!-- Główna nakładka -->
   <iframe class="overlay-main" src="{{ main_overlay }}"></iframe>
+
+  {% set snapshot = main_snapshot | default({}) %}
+  <div class="status-panel" aria-live="polite">
+    <span class="status-pill status-{{ 'on' if snapshot.overlay_is_on else 'off' }}">Overlay: {{ snapshot.overlay_label | default('OFF') }}</span>
+    <span class="status-info">Status: {{ snapshot.status_label | default('Brak danych') }}</span>
+    {% if snapshot.last_updated %}
+    <time class="status-info" datetime="{{ snapshot.last_updated }}">Ostatnia aktualizacja: {{ snapshot.last_updated }}</time>
+    {% else %}
+    <span class="status-info">Ostatnia aktualizacja: brak danych</span>
+    {% endif %}
+  </div>
 
   <!-- Pasek górny z miniaturami -->
   <div class="top-strip">
@@ -92,7 +162,7 @@
     {% set effective_label_style = mini_label_style | default(computed_label_style) %}
 
     {% if mini_config %}
-      {% for i, url in mini_overlays | default([]) %}
+      {% for mini in mini_overlays | default([]) %}
         <div class="mini-overlay"
              style="width: {{ (mini_config.view_width | default(fallback_mini_config.view_width | default(default_mini_config.view_width)))
                                 * (mini_config.display_scale | default(fallback_mini_config.display_scale | default(default_mini_config.display_scale))) }}px;
@@ -106,7 +176,7 @@
 
           <!-- Przesunięty fragment wycinka -->
           <iframe
-            src="{{ url }}"
+            src="{{ mini.overlay }}"
             style="
               width: 1920px;
               height: 1080px;
@@ -120,7 +190,16 @@
 
           <!-- Etykieta kortu -->
           <div class="kort-label" style="{{ effective_label_style }}">
-            Kort {{ i }}
+            <div>Kort {{ mini.kort_id }}</div>
+            <div class="mini-meta">
+              <span class="status-pill status-{{ 'on' if mini.overlay_is_on else 'off' }}" style="font-size: 0.75rem; padding: 0.15rem 0.55rem;">Overlay: {{ mini.overlay_label }}</span>
+              <span>Status: {{ mini.status_label }}</span>
+              {% if mini.last_updated %}
+              <time datetime="{{ mini.last_updated }}">Ostatnia aktualizacja: {{ mini.last_updated }}</time>
+              {% else %}
+              <span>Ostatnia aktualizacja: brak danych</span>
+              {% endif %}
+            </div>
           </div>
 
         </div>

@@ -100,6 +100,11 @@
       font-weight: 600;
     }
 
+    .status-brak_danych {
+      color: #94a3b8;
+      font-weight: 600;
+    }
+
     .serving-indicator {
       color: #f97316;
       font-weight: 700;
@@ -128,6 +133,36 @@
       gap: 0.25rem;
     }
 
+    .overlay-pill {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.35rem;
+      font-size: 0.85rem;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      font-weight: 700;
+      padding: 0.2rem 0.65rem;
+      border-radius: 999px;
+      width: fit-content;
+    }
+
+    .overlay-on {
+      background: rgba(74, 222, 128, 0.18);
+      color: #4ade80;
+      border: 1px solid rgba(74, 222, 128, 0.45);
+    }
+
+    .overlay-off {
+      background: rgba(239, 68, 68, 0.2);
+      color: #fca5a5;
+      border: 1px solid rgba(239, 68, 68, 0.45);
+    }
+
+    .last-updated {
+      font-size: 0.85rem;
+      color: #cbd5f5;
+    }
+
     @media (max-width: 768px) {
       main {
         padding: 1.5rem 0.5rem 3rem;
@@ -148,16 +183,17 @@
     <div class="results-container" aria-live="polite">
       <h1>Wyniki meczów tenisowych</h1>
 
-      <section aria-labelledby="active-matches">
-        <h2 id="active-matches">Aktywne mecze</h2>
-        {% if not has_running_matches and active_matches %}
+      {% for section in sections %}
+      <section aria-labelledby="section-{{ section.status }}">
+        <h2 id="section-{{ section.status }}">{{ section.title }}</h2>
+        {% if section.status == 'active' and not has_running_matches and has_non_running_snapshots %}
         <p class="notice">Brak potwierdzonych aktywnych spotkań – prezentujemy ostatnio dostępne korty wraz z informacją o braku danych.</p>
-        {% elif not active_matches %}
-        <p class="notice">Brak aktywnych kortów do wyświetlenia.</p>
+        {% elif not section.matches %}
+        <p class="notice">{{ section.empty_message }}</p>
         {% endif %}
         <div class="table-wrapper">
           <table>
-            <caption>Aktualne spotkania i status kortów</caption>
+            <caption>{{ section.caption }}</caption>
             <thead>
               <tr>
                 <th scope="col">Kort</th>
@@ -169,8 +205,8 @@
               </tr>
             </thead>
             <tbody>
-              {% if active_matches %}
-              {% for match in active_matches %}
+              {% if section.matches %}
+              {% for match in section.matches %}
               {% for player in match.players %}
               <tr>
                 {% if loop.first %}
@@ -186,6 +222,13 @@
                 <td rowspan="{{ match.row_span }}" class="status-{{ match.status }}">{{ match.status_label }}</td>
                 <td rowspan="{{ match.row_span }}">
                   <div class="summary">
+                    <span class="overlay-pill overlay-{{ 'on' if match.overlay_is_on else 'off' }}">Overlay: {{ match.overlay_label }}</span>
+                    {% if match.last_updated %}
+                    <time class="last-updated" datetime="{{ match.last_updated }}">Ostatnia aktualizacja: {{ match.last_updated }}</time>
+                    {% else %}
+                    <span class="last-updated">Ostatnia aktualizacja: brak danych</span>
+                    {% endif %}
+                    <span>Status: {{ match.status_label }}</span>
                     <span>Sety ogółem: {{ match.set_summary }}</span>
                     <span>Stan punktów: {{ match.score_summary }}</span>
                   </div>
@@ -196,64 +239,14 @@
               {% endfor %}
               {% else %}
               <tr>
-                <td class="empty-state" colspan="6">Aktualnie brak danych o aktywnych kortach.</td>
+                <td class="empty-state" colspan="6">{{ section.empty_message }}</td>
               </tr>
               {% endif %}
             </tbody>
           </table>
         </div>
       </section>
-
-      <section aria-labelledby="finished-matches">
-        <h2 id="finished-matches">Zakończone mecze</h2>
-        <div class="table-wrapper">
-          <table>
-            <caption>Zakończone spotkania</caption>
-            <thead>
-              <tr>
-                <th scope="col">Kort</th>
-                <th scope="col">Zawodnik</th>
-                <th scope="col">Sety</th>
-                <th scope="col">Gemy/Punkty</th>
-                <th scope="col">Status</th>
-                <th scope="col">Podsumowanie</th>
-              </tr>
-            </thead>
-            <tbody>
-              {% if finished_matches %}
-              {% for match in finished_matches %}
-              {% for player in match.players %}
-              <tr>
-                {% if loop.first %}
-                <th scope="rowgroup" rowspan="{{ match.row_span }}">{{ match.kort_label }}</th>
-                {% endif %}
-                <th scope="row">
-                  {% if player.is_serving %}<span class="serving-indicator" aria-label="Serwuje">▶</span>{% endif %}
-                  {{ player.display_name }}
-                </th>
-                <td>{{ player.display_sets }}</td>
-                <td>{{ player.display_games }}</td>
-                {% if loop.first %}
-                <td rowspan="{{ match.row_span }}" class="status-{{ match.status }}">{{ match.status_label }}</td>
-                <td rowspan="{{ match.row_span }}">
-                  <div class="summary">
-                    <span>Sety ogółem: {{ match.set_summary }}</span>
-                    <span>Stan punktów: {{ match.score_summary }}</span>
-                  </div>
-                </td>
-                {% endif %}
-              </tr>
-              {% endfor %}
-              {% endfor %}
-              {% else %}
-              <tr>
-                <td class="empty-state" colspan="6">Brak zakończonych meczów do wyświetlenia.</td>
-              </tr>
-              {% endif %}
-            </tbody>
-          </table>
-        </div>
-      </section>
+      {% endfor %}
     </div>
   </main>
 </body>

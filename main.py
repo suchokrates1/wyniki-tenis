@@ -3,6 +3,8 @@ import json
 import logging
 import os
 import re
+from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
 from functools import wraps
 from pathlib import Path
 from urllib.parse import urlparse
@@ -85,7 +87,34 @@ ACTIVE_STATUSES = {
 STATUS_LABELS = {
     "active": "W trakcie",
     "finished": "Zakończony",
-    "unavailable": "Brak danych",
+    "unavailable": "Niedostępny",
+    "brak_danych": "Brak danych",
+}
+
+UNAVAILABLE_STATUSES = {"unavailable", "niedostępny", "niedostepny"}
+NO_DATA_STATUSES = {"brak danych", "brak_danych", "no data", "no_data"}
+STATUS_ORDER = ["active", "finished", "unavailable", "brak_danych"]
+STATUS_VIEW_META = {
+    "active": {
+        "title": "Aktywne mecze",
+        "caption": "Aktualne spotkania i status kortów",
+        "empty_message": "Aktualnie brak danych o aktywnych kortach.",
+    },
+    "finished": {
+        "title": "Zakończone mecze",
+        "caption": "Zakończone spotkania",
+        "empty_message": "Brak zakończonych meczów do wyświetlenia.",
+    },
+    "unavailable": {
+        "title": "Korty niedostępne",
+        "caption": "Ostatnio obserwowane korty bez dostępu",
+        "empty_message": "Wszystkie korty są obecnie dostępne.",
+    },
+    "brak_danych": {
+        "title": "Korty bez danych",
+        "caption": "Korty bez ostatnich danych pomiarowych",
+        "empty_message": "Brak kortów bez danych do wyświetlenia.",
+    },
 }
 
 DEFAULT_BASE_CONFIG = {
@@ -331,18 +360,27 @@ def extract_kort_id(entry, fallback):
 
 
 def normalize_status(raw_status, available, has_snapshot):
-    if not has_snapshot or not available:
+    if not has_snapshot:
+        return "brak_danych"
+
+    status_text = str(raw_status or "").strip().lower()
+
+    if status_text in NO_DATA_STATUSES:
+        return "brak_danych"
+
+    if status_text in FINISHED_STATUSES:
+        base_status = "finished"
+    elif status_text in ACTIVE_STATUSES or status_text == "ok":
+        base_status = "active"
+    elif status_text in UNAVAILABLE_STATUSES:
+        base_status = "unavailable"
+    else:
+        base_status = "active"
+
+    if not available and base_status != "brak_danych":
         return "unavailable"
 
-    if not raw_status:
-        return "active"
-
-    status = str(raw_status).strip().lower()
-    if status in FINISHED_STATUSES:
-        return "finished"
-    if status in ACTIVE_STATUSES:
-        return "active"
-    return status or "active"
+    return base_status
 
 
 def display_value(value, fallback="brak danych"):
@@ -445,6 +483,34 @@ def normalize_players(players_data, serving_marker):
     return normalized
 
 
+def normalize_last_updated(value):
+    if value is None:
+        return None
+
+    if isinstance(value, datetime):
+        moment = value
+    elif isinstance(value, (int, float)):
+        moment = datetime.fromtimestamp(float(value), tz=timezone.utc)
+    elif isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return None
+        try:
+            moment = datetime.fromisoformat(text)
+        except ValueError:
+            try:
+                moment = parsedate_to_datetime(text)
+            except (TypeError, ValueError):
+                return text
+    else:
+        return str(value)
+
+    if moment.tzinfo is None:
+        moment = moment.replace(tzinfo=timezone.utc)
+
+    return moment.astimezone(timezone.utc).isoformat()
+
+
 def load_snapshots():
     directory = Path(app.config.get("SNAPSHOTS_DIR", BASE_DIR / "snapshots"))
     if not directory.exists():
@@ -483,6 +549,14 @@ def normalize_snapshot_entry(kort_id, snapshot, link_meta=None):
     status = normalize_status(snapshot.get("status"), available, has_snapshot)
     status_label = STATUS_LABELS.get(status, status.replace("_", " ").capitalize())
 
+    overlay_is_on = bool(available)
+    overlay_label = "ON" if overlay_is_on else "OFF"
+    last_updated = normalize_last_updated(
+        snapshot.get("last_updated")
+        or snapshot.get("updated_at")
+        or snapshot.get("timestamp")
+    )
+
     kort_label = (
         snapshot.get("court_name")
         or snapshot.get("kort_name")
@@ -510,6 +584,9 @@ def normalize_snapshot_entry(kort_id, snapshot, link_meta=None):
         "status_label": status_label,
         "available": available,
         "has_snapshot": has_snapshot,
+        "overlay_is_on": overlay_is_on,
+        "overlay_label": overlay_label,
+        "last_updated": last_updated,
         "players": players,
         "row_span": row_span,
         "score_summary": score_summary,
@@ -877,26 +954,40 @@ def wyniki():
     known_ids.update(str(kort_id) for kort_id in snapshots.keys())
     sorted_ids = sorted(known_ids, key=kort_id_sort_key)
 
-    active_matches = []
-    finished_matches = []
+    matches_by_status = {status: [] for status in STATUS_ORDER}
 
     for kort_id in sorted_ids:
         normalized = normalize_snapshot_entry(kort_id, snapshots.get(kort_id), links.get(kort_id))
-        if normalized["status"] == "finished":
-            finished_matches.append(normalized)
-        else:
-            active_matches.append(normalized)
+        matches_by_status.setdefault(normalized["status"], []).append(normalized)
 
-    active_matches.sort(key=lambda match: kort_id_sort_key(match["kort_id"]))
-    finished_matches.sort(key=lambda match: kort_id_sort_key(match["kort_id"]))
+    for status_matches in matches_by_status.values():
+        status_matches.sort(key=lambda match: kort_id_sort_key(match["kort_id"]))
 
-    has_running_matches = any(match["status"] == "active" for match in active_matches)
+    has_running_matches = bool(matches_by_status.get("active"))
+    has_non_running_snapshots = any(
+        matches_by_status.get(status)
+        for status in STATUS_ORDER
+        if status not in {"active", "finished"}
+    )
+
+    sections = []
+    for status in STATUS_ORDER:
+        meta = STATUS_VIEW_META.get(status, {})
+        sections.append(
+            {
+                "status": status,
+                "title": meta.get("title", status.replace("_", " ").title()),
+                "caption": meta.get("caption", ""),
+                "empty_message": meta.get("empty_message", ""),
+                "matches": matches_by_status.get(status, []),
+            }
+        )
 
     return render_template(
         "wyniki.html",
-        active_matches=active_matches,
-        finished_matches=finished_matches,
+        sections=sections,
         has_running_matches=has_running_matches,
+        has_non_running_snapshots=has_non_running_snapshots,
     )
 
 
@@ -915,13 +1006,40 @@ def overlay_kort(kort_id):
     mini_config = kort_all_config.get("top_left") or get_default_corner_config("top_left")
     mini_label_style = build_label_style(mini_config.get("label"))
 
+    snapshots = load_snapshots()
     main_overlay = links_by_id[kort_id]["overlay"]
-    mini = [(k, v["overlay"]) for k, v in links_by_id.items() if k != kort_id]
+    main_snapshot = normalize_snapshot_entry(
+        kort_id,
+        snapshots.get(kort_id),
+        links_by_id.get(kort_id),
+    )
+
+    mini = []
+    for mini_id, data in links_by_id.items():
+        if mini_id == kort_id:
+            continue
+        normalized = normalize_snapshot_entry(
+            mini_id,
+            snapshots.get(mini_id),
+            data,
+        )
+        mini.append(
+            {
+                "kort_id": mini_id,
+                "overlay": data["overlay"],
+                "status_label": normalized["status_label"],
+                "status": normalized["status"],
+                "overlay_is_on": normalized["overlay_is_on"],
+                "overlay_label": normalized["overlay_label"],
+                "last_updated": normalized["last_updated"],
+            }
+        )
 
     return render_template(
         "kort.html",
         kort_id=kort_id,
         main_overlay=main_overlay,
+        main_snapshot=main_snapshot,
         mini_overlays=mini,
         config=overlay_config,
         mini_config=mini_config,
@@ -936,10 +1054,12 @@ def overlay_all():
 
     overlays = []
     sorted_overlays = [link.to_dict() for link in get_overlay_links()]
+    snapshots = load_snapshots()
 
     for link, corner_key in zip(sorted_overlays, CORNERS):
         kort_id = link["kort_id"]
         corner_config = overlay_config["kort_all"].get(corner_key, get_default_corner_config(corner_key))
+        normalized = normalize_snapshot_entry(kort_id, snapshots.get(kort_id), link)
         overlays.append(
             {
                 "id": kort_id,
@@ -948,6 +1068,11 @@ def overlay_all():
                 "corner_key": corner_key,
                 "config": corner_config,
                 "label_style": build_label_style(corner_config.get("label")),
+                "status": normalized["status"],
+                "status_label": normalized["status_label"],
+                "overlay_is_on": normalized["overlay_is_on"],
+                "overlay_label": normalized["overlay_label"],
+                "last_updated": normalized["last_updated"],
             }
         )
 
