@@ -308,6 +308,31 @@ def test_merge_partial_payload_defaults_available_to_false():
     assert snapshot["available"] is False
 
 
+def test_merge_partial_payload_single_player_payload_does_not_set_ok():
+    kort_id = "single-player"
+    first = results_module._flatten_overlay_payload(
+        {"NamePlayerA": "A. Kowalski", "PointsPlayerA": 15}
+    )
+
+    snapshot = results_module._merge_partial_payload(kort_id, first)
+
+    assert snapshot["status"] == SNAPSHOT_STATUS_NO_DATA
+
+
+def test_merge_partial_payload_name_only_updates_keep_status_no_data():
+    kort_id = "name-only"
+
+    first = results_module._flatten_overlay_payload({"NamePlayerA": "A. Kowalski"})
+    snapshot = results_module._merge_partial_payload(kort_id, first)
+
+    assert snapshot["status"] == SNAPSHOT_STATUS_NO_DATA
+
+    second = results_module._flatten_overlay_payload({"NamePlayerB": "B. Zielińska"})
+    snapshot = results_module._merge_partial_payload(kort_id, second)
+
+    assert snapshot["status"] == SNAPSHOT_STATUS_NO_DATA
+
+
 def test_partial_updates_allow_state_progression():
     kort_id = "2"
     state = results_module._ensure_court_state(kort_id)
@@ -321,6 +346,18 @@ def test_partial_updates_allow_state_progression():
 
     second = results_module._flatten_overlay_payload({"NamePlayerB": "B. Zielińska"})
     snapshot = results_module._merge_partial_payload(kort_id, second)
+
+    for _ in range(results_module.NAME_STABILIZATION_TICKS):
+        now += 1
+        results_module._process_snapshot(state, snapshot, now)
+
+    assert snapshot["status"] == SNAPSHOT_STATUS_NO_DATA
+    assert state.phase is CourtPhase.IDLE_NAMES
+
+    third = results_module._flatten_overlay_payload(
+        {"PointsPlayerA": 0, "PointsPlayerB": 0}
+    )
+    snapshot = results_module._merge_partial_payload(kort_id, third)
 
     for _ in range(results_module.NAME_STABILIZATION_TICKS):
         now += 1

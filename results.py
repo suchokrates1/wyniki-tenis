@@ -757,12 +757,67 @@ def _merge_partial_payload(kort_id: str, partial: Dict[str, Any]) -> Dict[str, A
         entry["players"] = merged_players
         entry["serving"] = serving
 
+        def _has_content(value: Any) -> bool:
+            if value is None:
+                return False
+            if isinstance(value, str):
+                return bool(value.strip())
+            if isinstance(value, bool):
+                return value
+            if isinstance(value, (dict, list, tuple, set)):
+                return bool(value)
+            return True
+
         def _player_has_payload(player_raw: Any) -> bool:
             if not isinstance(player_raw, dict):
                 return False
-            return any(value not in (None, "", {}, []) for value in player_raw.values())
 
-        if all(_player_has_payload(raw.get(f"Player{suffix}")) for suffix in ("A", "B")):
+            name_value: Optional[Any] = None
+            for key in ("name", "Name", "Value"):
+                if key not in player_raw:
+                    continue
+                candidate = player_raw.get(key)
+                if isinstance(candidate, str):
+                    if candidate.strip():
+                        name_value = candidate
+                        break
+                elif candidate not in (None, ""):
+                    name_value = candidate
+                    break
+            if not isinstance(name_value, str) or not name_value.strip():
+                return False
+
+            points_value: Optional[Any] = None
+            for key in ("points", "Points"):
+                if key not in player_raw:
+                    continue
+                candidate = player_raw.get(key)
+                if isinstance(candidate, str):
+                    if candidate.strip():
+                        points_value = candidate
+                        break
+                elif candidate is not None:
+                    points_value = candidate
+                    break
+            has_points = points_value is not None
+
+            set_values: list[Any] = []
+            sets_mapping = player_raw.get("sets")
+            if isinstance(sets_mapping, dict):
+                for key, value in sets_mapping.items():
+                    if "set" in str(key).lower():
+                        set_values.append(value)
+            if not set_values:
+                for key, value in player_raw.items():
+                    key_text = str(key).lower()
+                    if "set" in key_text:
+                        set_values.append(value)
+            has_sets = any(_has_content(value) for value in set_values)
+
+            return has_points or has_sets
+
+        entry["status"] = SNAPSHOT_STATUS_NO_DATA
+        if all(_player_has_payload(merged_players.get(suffix)) for suffix in ("A", "B")):
             entry["status"] = SNAPSHOT_STATUS_OK
 
         snapshots[str(kort_id)] = entry
