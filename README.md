@@ -33,6 +33,18 @@ Aplikacja Flask do zarządzania linkami i konfiguracją overlayów wykorzystywan
    ```
    Alternatywnie możesz wystartować aplikację poleceniem `python main.py` lub użyć kontenera Docker (`docker-compose up`).
 
+### Trwałość danych w Docker Compose
+
+Plik bazy danych `overlay.db` jest przechowywany w katalogu `data/`, który jest montowany do kontenera jako wolumen (`./data:/app/data`).
+Pozwala to utrzymać dane między restartami kontenera.
+
+1. Przy pierwszym uruchomieniu wykonaj `docker-compose up`. Katalog `data/` zostanie utworzony automatycznie i zapisze się w nim plik `overlay.db`.
+2. Zatrzymaj kontener (`Ctrl+C` lub `docker-compose down`).
+3. Upewnij się, że plik `data/overlay.db` nadal istnieje na hoście.
+4. Ponownie uruchom usługę (`docker-compose up`) – kontener wczyta istniejącą bazę i zachowa wszystkie dane.
+
+Zmienne `CONFIG_AUTH_USERNAME` oraz `CONFIG_AUTH_PASSWORD` możesz zdefiniować w pliku `.env`, aby `docker-compose` przekazał je do kontenera (wspierane są również wartości ustawione w środowisku systemowym).
+
 Po uruchomieniu aplikacja nasłuchuje na porcie określonym zmienną `PORT` (domyślnie `5000`). Baza danych `overlay.db` zostanie utworzona automatycznie przy pierwszym starcie.
 
 ## Konfiguracja środowiska
@@ -43,7 +55,7 @@ W pliku `.env.example` znajdują się wszystkie najważniejsze zmienne środowis
 | `FLASK_APP` | Nazwa modułu używanego przez `flask run`. |
 | `FLASK_ENV` | Tryb pracy aplikacji (np. `development` lub `production`). |
 | `PORT` | Port, na którym aplikacja nasłuchuje żądań HTTP. |
-| `DATABASE_URL` | URI bazy danych SQLAlchemy. Domyślnie używany jest plik `sqlite:///overlay.db`. |
+| `DATABASE_URL` | URI bazy danych SQLAlchemy. Domyślnie używany jest plik `sqlite:///overlay.db` (dla uruchomień lokalnych); `docker-compose` wskazuje na `sqlite:///data/overlay.db`. |
 | `CONFIG_AUTH_USERNAME` | Login wymagany przy dostępie do panelu `/config`. |
 | `CONFIG_AUTH_PASSWORD` | Hasło do panelu konfiguracji. |
 | `LOG_LEVEL` | Poziom logowania aplikacji (`DEBUG`, `INFO`, `WARNING`, `ERROR`, `CRITICAL`). |
