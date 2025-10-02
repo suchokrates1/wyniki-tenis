@@ -58,8 +58,8 @@ def test_kort_template_with_empty_context():
 def test_overlay_links_api_create_and_list(client):
     payload = {
         "kort_id": "99",
-        "overlay": "https://example.com/overlay",
-        "control": "https://example.com/control",
+        "overlay": "https://app.overlays.uno/output/test99",
+        "control": "https://app.overlays.uno/control/test99",
     }
     response = client.post("/api/overlay-links", json=payload)
     assert response.status_code == 201
@@ -72,11 +72,62 @@ def test_overlay_links_api_create_and_list(client):
     assert any(link["kort_id"] == payload["kort_id"] for link in links)
 
 
+def test_overlay_links_api_rejects_invalid_scheme(client):
+    payload = {
+        "kort_id": "100",
+        "overlay": "http://app.overlays.uno/output/test100",
+        "control": "https://app.overlays.uno/control/test100",
+    }
+    response = client.post("/api/overlay-links", json=payload)
+    assert response.status_code == 400
+    errors = response.get_json()["errors"]
+    assert errors["overlay"] == "Adres overlayu musi używać protokołu HTTPS."
+
+
+def test_overlay_links_api_rejects_invalid_host(client):
+    payload = {
+        "kort_id": "101",
+        "overlay": "https://example.com/output/test101",
+        "control": "https://app.overlays.uno/control/test101",
+    }
+    response = client.post("/api/overlay-links", json=payload)
+    assert response.status_code == 400
+    errors = response.get_json()["errors"]
+    assert errors["overlay"] == "Adres overlayu musi wskazywać na app.overlays.uno."
+
+
+def test_overlay_links_api_rejects_invalid_path(client):
+    payload = {
+        "kort_id": "102",
+        "overlay": "https://app.overlays.uno/not-output/test102",
+        "control": "https://app.overlays.uno/control/test102",
+    }
+    response = client.post("/api/overlay-links", json=payload)
+    assert response.status_code == 400
+    errors = response.get_json()["errors"]
+    assert errors["overlay"] == "Adres overlayu musi mieć ścieżkę w formacie /output/{id}."
+
+
+def test_overlay_links_api_rejects_invalid_control_path(client):
+    payload = {
+        "kort_id": "103",
+        "overlay": "https://app.overlays.uno/output/test103",
+        "control": "https://app.overlays.uno/not-control/test103",
+    }
+    response = client.post("/api/overlay-links", json=payload)
+    assert response.status_code == 400
+    errors = response.get_json()["errors"]
+    assert (
+        errors["control"]
+        == "Adres panelu sterowania musi mieć ścieżkę w formacie /control/{id} lub /controlapps/{id}."
+    )
+
+
 def test_index_renders_links_from_database(client):
     new_link = {
         "kort_id": "77",
-        "overlay": "https://example.com/new-overlay",
-        "control": "https://example.com/new-control",
+        "overlay": "https://app.overlays.uno/output/test77",
+        "control": "https://app.overlays.uno/controlapps/test77",
     }
     post_response = client.post("/api/overlay-links", json=new_link)
     assert post_response.status_code == 201
@@ -91,8 +142,8 @@ def test_index_renders_links_from_database(client):
 def test_overlay_kort_uses_new_link(client):
     new_link = {
         "kort_id": "55",
-        "overlay": "https://example.com/overlay-55",
-        "control": "https://example.com/control-55",
+        "overlay": "https://app.overlays.uno/output/test55",
+        "control": "https://app.overlays.uno/control/test55",
     }
     create_response = client.post("/api/overlay-links", json=new_link)
     assert create_response.status_code == 201
