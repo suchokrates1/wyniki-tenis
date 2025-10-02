@@ -24,6 +24,8 @@ def test_overlay_all_view(client):
     assert "class=\"stage\"" in html or "class=\"stage\"".replace('"', '&quot;') in html
     assert html.count("kort-frame") >= 1
     assert "Kort 1" in html and "Kort 4" in html
+    assert "Overlay:" in html
+    assert "Ostatnia aktualizacja" in html
 
 
 def test_overlay_all_route_registered():
@@ -155,6 +157,7 @@ def test_overlay_kort_uses_new_link(client):
     assert response.status_code == 200
     html = response.get_data(as_text=True)
     assert new_link["overlay"] in html
+    assert "Overlay:" in html
 
 
 def test_overlay_links_page_renders(client):
