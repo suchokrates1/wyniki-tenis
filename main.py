@@ -182,14 +182,56 @@ class OverlayLink(db.Model):
         }
 
 
-def is_valid_url(value):
-    if not value:
+APP_OVERLAYS_HOST = "app.overlays.uno"
+
+
+def _path_has_identifier(path: str, prefix: str) -> bool:
+    if not path.startswith(prefix):
         return False
+    remainder = path[len(prefix) :]
+    return bool(remainder) and "/" not in remainder
+
+
+def _validate_app_overlays_url(url, *, field_label, path_options):
+    if not url:
+        return None, f"{field_label} jest wymagany."
+
     try:
-        parsed = urlparse(value)
+        parsed = urlparse(url)
     except ValueError:
-        return False
-    return parsed.scheme in {"http", "https"} and bool(parsed.netloc)
+        return None, f"{field_label} ma niepoprawny format."
+
+    if parsed.scheme != "https":
+        return None, f"{field_label} musi używać protokołu HTTPS."
+
+    if parsed.netloc.lower() != APP_OVERLAYS_HOST:
+        return None, f"{field_label} musi wskazywać na {APP_OVERLAYS_HOST}."
+
+    for prefix, description in path_options:
+        if _path_has_identifier(parsed.path or "", prefix):
+            return url, None
+
+    description = " lub ".join(desc for _, desc in path_options)
+    return None, f"{field_label} musi mieć ścieżkę w formacie {description}."
+
+
+def validate_overlay_url(url):
+    return _validate_app_overlays_url(
+        url,
+        field_label="Adres overlayu",
+        path_options=(("/output/", "/output/{id}"),),
+    )
+
+
+def validate_control_url(url):
+    return _validate_app_overlays_url(
+        url,
+        field_label="Adres panelu sterowania",
+        path_options=(
+            ("/control/", "/control/{id}"),
+            ("/controlapps/", "/controlapps/{id}"),
+        ),
+    )
 
 
 def overlay_link_sort_key(link):
@@ -220,18 +262,20 @@ def ensure_overlay_links_seeded():
     for kort_id, payload in data.items():
         overlay_url = (payload or {}).get("overlay")
         control_url = (payload or {}).get("control")
-        if not (is_valid_url(overlay_url) and is_valid_url(control_url)):
+        overlay_valid, overlay_error = validate_overlay_url(overlay_url)
+        control_valid, control_error = validate_control_url(control_url)
+        if overlay_error or control_error:
             logger.warning(
-                "Pominięto link dla kortu %s - niepoprawne adresy overlay=%s control=%s",
+                "Pominięto link dla kortu %s - %s %s",
                 kort_id,
-                overlay_url,
-                control_url,
+                overlay_error or "",
+                control_error or "",
             )
             continue
         link = OverlayLink(
             kort_id=str(kort_id),
-            overlay_url=overlay_url,
-            control_url=control_url,
+            overlay_url=overlay_valid,
+            control_url=control_valid,
         )
         db.session.add(link)
         created = True
@@ -484,16 +528,18 @@ def validate_overlay_link_data(data):
         normalized["kort_id"] = kort_id
 
     overlay_url = (data or {}).get("overlay")
-    if not is_valid_url(overlay_url):
-        errors["overlay"] = "Niepoprawny adres URL overlayu."
+    overlay_valid, overlay_error = validate_overlay_url(overlay_url)
+    if overlay_error:
+        errors["overlay"] = overlay_error
     else:
-        normalized["overlay_url"] = overlay_url
+        normalized["overlay_url"] = overlay_valid
 
     control_url = (data or {}).get("control")
-    if not is_valid_url(control_url):
-        errors["control"] = "Niepoprawny adres URL panelu sterowania."
+    control_valid, control_error = validate_control_url(control_url)
+    if control_error:
+        errors["control"] = control_error
     else:
-        normalized["control_url"] = control_url
+        normalized["control_url"] = control_valid
 
     return normalized, errors
 
