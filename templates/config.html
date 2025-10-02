@@ -56,6 +56,18 @@
         <p class="text-sm text-gray-300">Dostosuj parametry widoków pojedynczych i wszystkich kortów. Zmiany zapisują się w pliku konfiguracyjnym.</p>
       </header>
 
+      {% with messages = get_flashed_messages(with_categories=true) %}
+        {% if messages %}
+          <div class="space-y-2">
+            {% for category, message in messages %}
+              <div class="px-4 py-3 rounded-lg border text-sm {% if category == 'error' %}border-red-500/40 bg-red-500/10 text-red-200{% elif category == 'success' %}border-emerald-500/40 bg-emerald-500/10 text-emerald-100{% else %}border-gray-500/40 bg-gray-700/20 text-gray-100{% endif %}">
+                {{ message }}
+              </div>
+            {% endfor %}
+          </div>
+        {% endif %}
+      {% endwith %}
+
       <section class="space-y-4">
         <h2 class="text-xl font-semibold flex items-center gap-2">🧭 Ustawienia ogólne</h2>
         <div class="grid grid-cols-1 md:grid-cols-2 gap-4">

@@ -17,7 +17,7 @@ def auth_headers(monkeypatch):
 
 @pytest.fixture
 def client():
-    app.config.update(TESTING=True)
+    app.config.update(TESTING=True, SECRET_KEY="test-secret-key")
     with app.test_client() as client:
         yield client
 

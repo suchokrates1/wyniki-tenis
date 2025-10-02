@@ -6,6 +6,7 @@ from main import (
     CORNERS,
     CORNER_LABELS,
     CORNER_POSITION_STYLES,
+    DEFAULT_BASE_CONFIG,
     app,
     as_float,
     load_config,
@@ -105,6 +106,7 @@ def test_post_config_updates_overlay_file(authorized_client):
     html = response.get_data(as_text=True)
     assert 'value="720"' in html
     assert 'option value="bottom-right" selected' in html
+    assert 'border-red-500/40' not in html
 
     with app.app_context():
         stored = OverlayConfig.query.first()
@@ -218,6 +220,62 @@ def test_config_preview_uses_comma_decimal_values_in_styles(authorized_client):
     assert any("scale(1.25)" in style for style in iframe_styles)
 
 
+def test_post_config_rejects_invalid_dimensions(authorized_client):
+    payload = {
+        "view_width": "0",
+        "kort_all[top_left][view_height]": "-5",
+    }
+
+    response = authorized_client.post("/config", data=payload)
+
+    assert response.status_code == 400
+
+    html = response.get_data(as_text=True)
+    assert "musi być nie mniejsze" in html
+    tags = collect_start_tags(html)
+    width_input = find_first_tag(tags, "input", name="view_width")
+    assert width_input is not None
+    assert width_input.get("value") == "0"
+    corner_height_input = find_first_tag(
+        tags, "input", name="kort_all[top_left][view_height]"
+    )
+    assert corner_height_input is not None
+    assert corner_height_input.get("value") == "-5"
+
+    with app.app_context():
+        stored = OverlayConfig.query.first().to_dict()
+
+    assert stored["view_width"] == DEFAULT_BASE_CONFIG["view_width"]
+    assert (
+        stored["kort_all"]["top_left"]["view_height"]
+        == DEFAULT_BASE_CONFIG["view_height"]
+    )
+
+
+def test_post_config_rejects_invalid_label_position_with_json(authorized_client):
+    payload = {
+        "label_position": "middle",
+    }
+
+    response = authorized_client.post(
+        "/config",
+        data=payload,
+        headers={"Accept": "application/json"},
+    )
+
+    assert response.status_code == 400
+    assert response.is_json
+
+    payload = response.get_json()
+    assert payload["ok"] is False
+    assert any("niedozwoloną wartość" in error for error in payload["errors"])
+
+    with app.app_context():
+        stored = OverlayConfig.query.first().to_dict()
+
+    assert stored["label_position"] == DEFAULT_BASE_CONFIG["label_position"]
+
+
 def test_as_float_supports_dot_and_comma_decimal_separators():
     assert as_float("1.25", 0.0) == pytest.approx(1.25)
     assert as_float("1,25", 0.0) == pytest.approx(1.25)
@@ -274,7 +332,7 @@ def test_kort_all_renders_all_courts_with_labels(client):
 def test_config_template_renders_with_full_context():
     config = load_config()
 
-    with app.app_context():
+    with app.test_request_context():
         html = render_config(config)
 
     assert "Konfiguracja Overlay" in html
@@ -285,7 +343,7 @@ def test_config_template_renders_with_full_context():
 def test_config_template_handles_missing_corner_labels():
     config = load_config()
 
-    with app.app_context():
+    with app.test_request_context():
         template = app.jinja_env.get_template("config.html")
         html = template.render(
             config=config,
@@ -301,7 +359,7 @@ def test_config_template_handles_missing_corner_labels():
 def test_config_template_handles_absent_corner_positions_context():
     config = load_config()
 
-    with app.app_context():
+    with app.test_request_context():
         template = app.jinja_env.get_template("config.html")
         html = template.render(
             config=config,
@@ -319,7 +377,7 @@ def test_config_template_handles_missing_corner_position_entries():
     config = load_config()
     partial_positions = {"top_left": CORNER_POSITION_STYLES["top_left"]}
 
-    with app.app_context():
+    with app.test_request_context():
         template = app.jinja_env.get_template("config.html")
         html = template.render(
             config=config,
@@ -338,7 +396,7 @@ def test_config_preview_uses_safe_defaults_for_missing_corner_dimensions():
     config = load_config()
     config.setdefault("kort_all", {})["top_left"] = {}
 
-    with app.app_context():
+    with app.test_request_context():
         template = app.jinja_env.get_template("config.html")
         html = template.render(
             config=config,
