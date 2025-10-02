@@ -1,7 +1,10 @@
+import json
+
 import pytest
 from flask import render_template
 
-from main import app as flask_app
+import main
+from main import app as flask_app, OverlayLink
 
 
 @pytest.mark.parametrize("kort_id", [1, 2])
@@ -158,3 +161,55 @@ def test_overlay_links_page_renders(client):
     response = client.get("/overlay-links")
     assert response.status_code == 200
     assert "Linki do overlayów" in response.get_data(as_text=True)
+
+
+def test_overlay_links_reload_updates_database(client, auth_headers, tmp_path, monkeypatch):
+    json_path = tmp_path / "overlay_links.json"
+    initial_data = {
+        "1": {
+            "overlay": "https://app.overlays.uno/output/test-initial-1",
+            "control": "https://app.overlays.uno/control/test-initial-1",
+        },
+        "2": {
+            "overlay": "https://app.overlays.uno/output/test-initial-2",
+            "control": "https://app.overlays.uno/control/test-initial-2",
+        },
+    }
+    json_path.write_text(json.dumps(initial_data))
+    monkeypatch.setattr(main, "LINKS_PATH", str(json_path))
+
+    first_response = client.post("/api/overlay-links/reload", headers=auth_headers)
+    assert first_response.status_code == 200
+    first_payload = first_response.get_json()
+    assert first_payload == {"created": 2, "updated": 0, "removed": 0}
+
+    updated_data = {
+        "2": {
+            "overlay": "https://app.overlays.uno/output/test-updated-2",
+            "control": "https://app.overlays.uno/control/test-updated-2",
+        },
+        "3": {
+            "overlay": "https://app.overlays.uno/output/test-new-3",
+            "control": "https://app.overlays.uno/controlapps/test-new-3",
+        },
+    }
+    json_path.write_text(json.dumps(updated_data))
+
+    second_response = client.post("/api/overlay-links/reload", headers=auth_headers)
+    assert second_response.status_code == 200
+    second_payload = second_response.get_json()
+    assert second_payload == {"created": 1, "updated": 1, "removed": 1}
+
+    with flask_app.app_context():
+        links = {link.kort_id: link for link in OverlayLink.query.all()}
+
+    assert set(links.keys()) == {"2", "3"}
+    assert links["2"].overlay_url == updated_data["2"]["overlay"]
+    assert links["2"].control_url == updated_data["2"]["control"]
+    assert links["3"].overlay_url == updated_data["3"]["overlay"]
+    assert links["3"].control_url == updated_data["3"]["control"]
+
+
+def test_overlay_links_reload_requires_authentication(client):
+    response = client.post("/api/overlay-links/reload")
+    assert response.status_code == 401

@@ -13,6 +13,17 @@
     </div>
 
     <section class="bg-gray-800 rounded-lg shadow p-6 space-y-4">
+      <div>
+        <h2 class="text-xl font-semibold">Synchronizuj z plikiem</h2>
+        <p class="text-sm text-gray-300">Operacja ponownie wczyta dane z pliku <code>overlay_links.json</code>, aktualizując istniejące rekordy i usuwając nieaktualne wpisy.</p>
+      </div>
+      <div class="flex items-center gap-4">
+        <button type="button" class="px-4 py-2 bg-yellow-600 rounded hover:bg-yellow-500" data-reload data-endpoint="{{ url_for('overlay_links_reload') }}">Przeładuj</button>
+        <p class="text-sm hidden" data-reload-feedback></p>
+      </div>
+    </section>
+
+    <section class="bg-gray-800 rounded-lg shadow p-6 space-y-4">
       <h2 class="text-xl font-semibold">Dodaj nowy link</h2>
       <form class="space-y-4" data-overlay-form data-method="POST" data-endpoint="{{ url_for('overlay_links_api') }}">
         <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
@@ -165,6 +176,64 @@
     document.querySelectorAll('[data-delete]').forEach((button) => {
       button.addEventListener('click', handleOverlayDelete);
     });
+
+    const reloadButton = document.querySelector('[data-reload]');
+    const reloadFeedback = document.querySelector('[data-reload-feedback]');
+
+    async function handleOverlayReload(event) {
+      event.preventDefault();
+      if (!reloadButton || !reloadButton.dataset.endpoint) {
+        return;
+      }
+
+      if (!confirm('Czy na pewno chcesz przeładować linki z pliku? Bieżące wpisy zostaną zastąpione danymi z overlay_links.json.')) {
+        return;
+      }
+
+      if (reloadFeedback) {
+        reloadFeedback.classList.add('hidden');
+        reloadFeedback.textContent = '';
+        reloadFeedback.classList.remove('text-green-400', 'text-red-400');
+      }
+
+      reloadButton.disabled = true;
+
+      try {
+        const response = await fetch(reloadButton.dataset.endpoint, { method: 'POST' });
+
+        if (response.status === 401) {
+          window.location.href = reloadButton.dataset.endpoint;
+          return;
+        }
+
+        const data = await response.json().catch(() => ({}));
+
+        if (!response.ok) {
+          const message = data.error || 'Nie udało się przeładować linków.';
+          throw new Error(message);
+        }
+
+        if (reloadFeedback) {
+          reloadFeedback.textContent = `Dodano ${data.created || 0}, zaktualizowano ${data.updated || 0}, usunięto ${data.removed || 0}.`;
+          reloadFeedback.classList.remove('hidden');
+          reloadFeedback.classList.add('text-green-400');
+        }
+
+        setTimeout(() => window.location.reload(), 800);
+      } catch (error) {
+        if (reloadFeedback) {
+          reloadFeedback.textContent = error.message;
+          reloadFeedback.classList.remove('hidden');
+          reloadFeedback.classList.add('text-red-400');
+        }
+      } finally {
+        reloadButton.disabled = false;
+      }
+    }
+
+    if (reloadButton) {
+      reloadButton.addEventListener('click', handleOverlayReload);
+    }
   </script>
 </body>
 </html>
