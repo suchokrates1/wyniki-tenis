@@ -254,6 +254,34 @@ def test_merge_partial_payload_maps_single_player_fields():
     assert "B" not in snapshot["players"]
 
 
+@pytest.mark.parametrize(
+    ("payload", "expected"),
+    [
+        ({"OverlayVisibility": "on"}, True),
+        ({"OverlayVisibility": "off"}, False),
+        ({"OverlayVisibility": {"Value": "tak"}}, True),
+        ({"OverlayVisibility": {"Value": "nie"}}, False),
+        ({"OverlayVisibility": True}, True),
+        ({"OverlayVisibility": 0}, False),
+    ],
+)
+def test_merge_partial_payload_sets_available_flag(payload, expected):
+    kort_id = "visibility"
+    flattened = results_module._flatten_overlay_payload(payload)
+
+    snapshot = results_module._merge_partial_payload(kort_id, flattened)
+
+    assert snapshot["available"] is expected
+
+
+def test_merge_partial_payload_defaults_available_to_false():
+    kort_id = "no-visibility"
+
+    snapshot = results_module._merge_partial_payload(kort_id, {})
+
+    assert snapshot["available"] is False
+
+
 def test_partial_updates_allow_state_progression():
     kort_id = "2"
     state = results_module._ensure_court_state(kort_id)
