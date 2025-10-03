@@ -148,6 +148,33 @@
       color: #fecaca;
     }
 
+    .status-badges {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0.4rem;
+    }
+
+    .status-badge {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 0.75rem;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      padding: 0.25rem 0.55rem;
+      border-radius: 999px;
+      border: 1px solid rgba(248, 250, 252, 0.4);
+      color: #f8fafc;
+      background: rgba(148, 163, 184, 0.25);
+    }
+
+    .status-badge-not_found {
+      border-color: rgba(248, 113, 113, 0.6);
+      background: rgba(248, 113, 113, 0.25);
+      color: #fecaca;
+    }
+
     .overlay-pill {
       display: inline-flex;
       align-items: center;
@@ -237,6 +264,13 @@
                 <td rowspan="{{ match.row_span }}" class="status-{{ match.status }}">{{ match.status_label }}</td>
                 <td rowspan="{{ match.row_span }}">
                   <div class="summary">
+                    {% if match.badges %}
+                    <div class="status-badges">
+                      {% for badge in match.badges %}
+                      <span class="status-badge status-badge-{{ badge.key | default('generic') }}"{% if badge.description %} title="{{ badge.description }}"{% endif %}>{{ badge.label }}</span>
+                      {% endfor %}
+                    </div>
+                    {% endif %}
                     <span class="overlay-pill overlay-{{ 'on' if match.overlay_is_on else 'off' }}">Overlay: {{ match.overlay_label }}</span>
                     {% if match.pause_active %}
                     <span class="pause-indicator">{{ match.pause_label }}</span>

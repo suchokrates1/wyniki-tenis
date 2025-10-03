@@ -6,7 +6,7 @@ import pytest
 import requests
 from requests import RequestException
 
-from main import app
+from main import app, normalize_snapshot_entry
 import results as results_module
 import results_state_machine
 from results import (
@@ -1043,4 +1043,66 @@ def test_update_once_does_not_retry_on_400(monkeypatch):
     snapshot = snapshots["1"]
     assert snapshot["status"] == SNAPSHOT_STATUS_UNAVAILABLE
     assert "HTTP 400" in snapshot["error"]
+
+
+def test_update_once_handles_404_with_cooldown_and_badge(monkeypatch):
+    snapshots.clear()
+    results_module.court_states.clear()
+
+    overlay_links = {
+        "1": {"control": "https://app.overlays.uno/control/notfound"}
+    }
+
+    def supplier():
+        return overlay_links
+
+    not_found_response = DummyResponse({"error": "missing"}, status_code=404)
+    success_payload = {
+        "PlayerA": {"value": "Player One"},
+        "PlayerB": {"value": "Player Two"},
+        "PointsPlayerA": {"value": "15"},
+        "PointsPlayerB": {"value": "30"},
+    }
+    session = SequenceSession(
+        [
+            not_found_response,
+            DummyResponse(success_payload, status_code=200),
+        ]
+    )
+
+    fake_time = TimeController(start=500.0)
+    monkeypatch.setattr(results_module.time, "time", fake_time.time)
+    monkeypatch.setattr(results_module.time, "sleep", fake_time.sleep)
+    monkeypatch.setattr(results_module.random, "uniform", lambda *_: 0.0)
+    monkeypatch.setattr(results_state_machine, "_default_offset", lambda *_: 0.0)
+
+    start = fake_time.time()
+    results_module._update_once(app, supplier, session=session, now=start)
+
+    assert len(session.requests) == 1
+    cooldown = results_module._next_allowed_request_by_controlapp.get("notfound")
+    assert cooldown is not None
+    expected_cooldown = start + results_module.NOT_FOUND_COOLDOWN_SECONDS
+    assert cooldown == pytest.approx(expected_cooldown, rel=1e-6)
+
+    snapshot_after_404 = copy.deepcopy(snapshots["1"])
+    assert any(
+        badge.get("label") == "404" for badge in snapshot_after_404.get("badges", [])
+    )
+
+    normalized = normalize_snapshot_entry("1", snapshot_after_404, overlay_links["1"])
+    assert any(badge["label"] == "404" for badge in normalized["badges"])
+
+    fake_time.current = start + results_module.NOT_FOUND_COOLDOWN_SECONDS - 1.0
+    results_module._update_once(app, supplier, session=session, now=fake_time.time())
+    assert len(session.requests) == 1
+
+    fake_time.current = start + results_module.NOT_FOUND_COOLDOWN_SECONDS + 1.0
+    results_module._update_once(app, supplier, session=session, now=fake_time.time())
+
+    assert len(session.requests) == 2
+    assert "notfound" not in results_module._next_allowed_request_by_controlapp
+    final_snapshot = snapshots["1"]
+    assert final_snapshot.get("badges") == []
+    assert fake_time.sleep_calls == []
 
