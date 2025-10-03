@@ -9,7 +9,7 @@ from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
 from functools import wraps
 from pathlib import Path
-from urllib.parse import urlparse
+from urllib.parse import unquote, urlparse
 
 from zoneinfo import ZoneInfo
 
@@ -54,9 +54,44 @@ logger = logging.getLogger(__name__)
 app = Flask(__name__)
 CORS(app)
 
+
+def ensure_sqlite_directory(uri: str, *, base_directory: Path | None = None) -> None:
+    """Ensure the parent directory for a SQLite database URI exists."""
+
+    if not isinstance(uri, str):
+        return
+
+    prefix = "sqlite:///"
+    if not uri.startswith(prefix):
+        return
+
+    parsed = urlparse(uri)
+    raw_path = unquote(parsed.path or "")
+    if not raw_path:
+        return
+
+    if uri.startswith("sqlite:////"):
+        filesystem_path = Path("/" + raw_path.lstrip("/"))
+    else:
+        relative_path = raw_path.lstrip("/")
+        if base_directory is not None:
+            filesystem_path = Path(base_directory) / relative_path
+        else:
+            filesystem_path = Path(relative_path)
+
+    directory = filesystem_path.parent
+    if str(directory) in ("", "."):
+        return
+
+    directory.mkdir(parents=True, exist_ok=True)
+
+
 app.config.setdefault(
     "SQLALCHEMY_DATABASE_URI",
     os.environ.get("DATABASE_URL", "sqlite:///overlay.db"),
+)
+ensure_sqlite_directory(
+    app.config["SQLALCHEMY_DATABASE_URI"], base_directory=Path(app.instance_path)
 )
 app.config.setdefault("SQLALCHEMY_TRACK_MODIFICATIONS", False)
 app.config.setdefault("SNAPSHOTS_DIR", BASE_DIR / "snapshots")
