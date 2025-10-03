@@ -41,6 +41,9 @@ RETRY_BASE_DELAY_SECONDS = 1.0
 RETRY_MAX_DELAY_SECONDS = 10.0
 RETRY_JITTER_MAX_SECONDS = 0.3
 
+COMMAND_ERROR_PAUSE_THRESHOLD = 3
+COMMAND_ERROR_PAUSE_MINUTES = 5
+
 FULL_SNAPSHOT_COMMAND = None
 
 ARCHIVE_LIMIT = 50
@@ -407,6 +410,9 @@ def ensure_snapshot_entry(kort_id: str) -> Dict[str, Any]:
                 "error": None,
                 "available": False,
                 "archive": [],
+                "pause_active": False,
+                "pause_minutes": COMMAND_ERROR_PAUSE_MINUTES,
+                "pause_until": None,
             },
         )
     return entry
@@ -705,6 +711,9 @@ def _merge_partial_payload(kort_id: str, partial: Dict[str, Any]) -> Dict[str, A
         entry.setdefault("available", False)
         entry["last_updated"] = _now_iso()
         entry["error"] = None
+        entry["pause_minutes"] = entry.get("pause_minutes") or COMMAND_ERROR_PAUSE_MINUTES
+        entry["pause_active"] = False
+        entry["pause_until"] = None
 
         try:
             parsed = parse_overlay_json(raw)
@@ -827,7 +836,48 @@ def _merge_partial_payload(kort_id: str, partial: Dict[str, Any]) -> Dict[str, A
     return snapshot
 
 
-def _handle_command_error(kort_id: str, error: str) -> Dict[str, Any]:
+def _handle_command_error(
+    kort_id: str,
+    error: str,
+    *,
+    state: Optional[CourtState] = None,
+    now: Optional[float] = None,
+    spec_name: Optional[str] = None,
+) -> Dict[str, Any]:
+    if now is None:
+        now = time.time()
+    if state is None:
+        state = _ensure_court_state(kort_id)
+
+    previous_pause_until = state.paused_until or 0.0
+    state.command_error_streak = min(state.command_error_streak + 1, 10_000)
+    if spec_name:
+        current = state.command_error_streak_by_spec.get(spec_name, 0) + 1
+        state.command_error_streak_by_spec[spec_name] = min(current, 10_000)
+
+    pause_activated = False
+    if state.command_error_streak >= COMMAND_ERROR_PAUSE_THRESHOLD:
+        pause_seconds = COMMAND_ERROR_PAUSE_MINUTES * 60
+        candidate_until = now + pause_seconds
+        if state.paused_until is None or candidate_until > state.paused_until:
+            state.paused_until = candidate_until
+        pause_activated = state.paused_until is not None and state.paused_until > now
+
+    if pause_activated and previous_pause_until <= now:
+        logger.warning(
+            "Kort %s przechodzi w pauzę na %s min po %s kolejnych błędach",
+            kort_id,
+            COMMAND_ERROR_PAUSE_MINUTES,
+            state.command_error_streak,
+        )
+
+    pause_until_iso = (
+        datetime.fromtimestamp(state.paused_until, timezone.utc).isoformat()
+        if state.paused_until is not None
+        else None
+    )
+    is_paused = state.paused_until is not None and state.paused_until > now
+
     entry = ensure_snapshot_entry(kort_id)
     with snapshots_lock:
         entry["error"] = error
@@ -837,6 +887,9 @@ def _handle_command_error(kort_id: str, error: str) -> Dict[str, Any]:
         entry.setdefault("archive", entry.get("archive", []))
         entry["last_updated"] = _now_iso()
         entry["available"] = False
+        entry["pause_minutes"] = entry.get("pause_minutes") or COMMAND_ERROR_PAUSE_MINUTES
+        entry["pause_active"] = is_paused
+        entry["pause_until"] = pause_until_iso
         snapshot = copy.deepcopy(entry)
     return snapshot
 
@@ -1022,6 +1075,9 @@ def _mark_unavailable(kort_id: str, *, error: Optional[str]) -> Dict[str, Any]:
         "serving": None,
         "error": error,
         "available": False,
+        "pause_minutes": COMMAND_ERROR_PAUSE_MINUTES,
+        "pause_active": False,
+        "pause_until": None,
     }
     entry = ensure_snapshot_entry(kort_id)
     with snapshots_lock:
@@ -1061,7 +1117,12 @@ def _update_once(
             logger.warning(
                 "Nie udało się przygotować adresu dla kortu %s: %s", kort_id, exc
             )
-            snapshot = _handle_command_error(kort_id, error=str(exc))
+            snapshot = _handle_command_error(
+                kort_id,
+                error=str(exc),
+                state=state,
+                now=current_time,
+            )
             _process_snapshot(state, snapshot, current_time)
             state.tick_counter += 1
             continue
@@ -1071,6 +1132,16 @@ def _update_once(
             remaining = max(0.0, cooldown_until - current_time)
             logger.debug(
                 "Pominięto żądanie dla kortu %s z powodu limitu (pozostało %.2f s)",
+                kort_id,
+                remaining,
+            )
+            state.tick_counter += 1
+            continue
+
+        if state.is_paused(current_time):
+            remaining = max(0.0, (state.paused_until or 0.0) - current_time)
+            logger.debug(
+                "Pominięto żądanie dla kortu %s z powodu pauzy (pozostało %.2f s)",
                 kort_id,
                 remaining,
             )
@@ -1093,6 +1164,8 @@ def _update_once(
         final_snapshot: Optional[Dict[str, Any]] = None
         last_error: Optional[str] = None
         last_response: Optional[requests.Response] = None
+
+        command_succeeded = False
 
         while True:
             response: Optional[requests.Response] = None
@@ -1123,7 +1196,13 @@ def _update_once(
                     kort_id,
                     exc,
                 )
-                final_snapshot = _handle_command_error(kort_id, error=str(exc))
+                final_snapshot = _handle_command_error(
+                    kort_id,
+                    error=str(exc),
+                    state=state,
+                    now=current_time,
+                    spec_name=spec_name,
+                )
                 break
 
             if response is not None:
@@ -1137,7 +1216,13 @@ def _update_once(
                         command,
                         diagnostics,
                     )
-                    final_snapshot = _handle_command_error(kort_id, error=diagnostics)
+                    final_snapshot = _handle_command_error(
+                        kort_id,
+                        error=diagnostics,
+                        state=state,
+                        now=current_time,
+                        spec_name=spec_name,
+                    )
                     break
 
                 if 400 <= status_code < 500 and status_code != 429:
@@ -1149,7 +1234,13 @@ def _update_once(
                         command,
                         diagnostics,
                     )
-                    final_snapshot = _handle_command_error(kort_id, error=diagnostics)
+                    final_snapshot = _handle_command_error(
+                        kort_id,
+                        error=diagnostics,
+                        state=state,
+                        now=current_time,
+                        spec_name=spec_name,
+                    )
                     break
 
                 if status_code == 429:
@@ -1212,7 +1303,13 @@ def _update_once(
                             kort_id,
                             exc,
                         )
-                        final_snapshot = _handle_command_error(kort_id, error=str(exc))
+                        final_snapshot = _handle_command_error(
+                            kort_id,
+                            error=str(exc),
+                            state=state,
+                            now=current_time,
+                            spec_name=spec_name,
+                        )
                         break
 
                     logger.debug(
@@ -1224,6 +1321,7 @@ def _update_once(
                     )
                     flattened = _flatten_overlay_payload(payload)
                     final_snapshot = _merge_partial_payload(kort_id, flattened)
+                    command_succeeded = True
                     break
 
             if should_retry:
@@ -1249,7 +1347,13 @@ def _update_once(
                         diagnostics,
                     )
                     error_message = last_error or diagnostics or "Nie udało się pobrać danych kortu"
-                    final_snapshot = _handle_command_error(kort_id, error=error_message)
+                    final_snapshot = _handle_command_error(
+                        kort_id,
+                        error=error_message,
+                        state=state,
+                        now=current_time,
+                        spec_name=spec_name,
+                    )
                     break
 
                 delay = _calculate_retry_delay(attempt, response=response)
@@ -1269,6 +1373,9 @@ def _update_once(
                 continue
 
             break
+
+        if command_succeeded:
+            state.clear_pause()
 
         if final_snapshot is not None:
             _process_snapshot(state, final_snapshot, current_time)
