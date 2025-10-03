@@ -43,6 +43,7 @@ RETRY_JITTER_MAX_SECONDS = 0.3
 
 COMMAND_ERROR_PAUSE_THRESHOLD = 3
 COMMAND_ERROR_PAUSE_MINUTES = 5
+UNAVAILABLE_SLOW_POLL_SECONDS = 60.0
 
 FULL_SNAPSHOT_COMMAND = None
 
@@ -1052,6 +1053,21 @@ def _process_snapshot(state: CourtState, snapshot: Dict[str, Any], now: float) -
 
     # Harmonogram komend aktualizowany jest w CourtState podczas przejść
 
+    availability_value = snapshot.get("available")
+    raw_payload = snapshot.get("raw")
+    has_visibility_flag = False
+    if isinstance(raw_payload, dict):
+        for key in raw_payload.keys():
+            key_text = str(key).lower()
+            if "overlayvisibility" in key_text or key_text == "overlayvisible":
+                has_visibility_flag = True
+                break
+
+    if availability_value is False and has_visibility_flag:
+        state.apply_availability_pause(now, UNAVAILABLE_SLOW_POLL_SECONDS)
+    elif availability_value is True:
+        state.clear_availability_pause()
+
 
 def update_snapshot_for_kort(
     kort_id: str,
@@ -1139,7 +1155,8 @@ def _update_once(
             continue
 
         if state.is_paused(current_time):
-            remaining = max(0.0, (state.paused_until or 0.0) - current_time)
+            pause_until = state.effective_pause_until() or current_time
+            remaining = max(0.0, pause_until - current_time)
             logger.debug(
                 "Pominięto żądanie dla kortu %s z powodu pauzy (pozostało %.2f s)",
                 kort_id,

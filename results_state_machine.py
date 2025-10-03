@@ -194,6 +194,7 @@ class CourtState:
     command_error_streak: int = 0
     command_error_streak_by_spec: Dict[str, int] = field(default_factory=dict)
     paused_until: Optional[float] = None
+    availability_paused_until: Optional[float] = None
 
     # --- pola z gałęzi "main" (rotacja A/B itp.)
     tick_counter: int = 0
@@ -390,15 +391,34 @@ class CourtState:
             return None
         return schedule.last_run
 
+    def effective_pause_until(self) -> Optional[float]:
+        candidates = [self.paused_until, self.availability_paused_until]
+        active = [value for value in candidates if value is not None]
+        if not active:
+            return None
+        return max(active)
+
     def is_paused(self, now: float) -> bool:
-        if self.paused_until is None:
+        effective = self.effective_pause_until()
+        if effective is None:
             return False
-        return self.paused_until > now
+        return effective > now
 
     def clear_pause(self) -> None:
         self.paused_until = None
         self.command_error_streak = 0
         self.command_error_streak_by_spec.clear()
+
+    def apply_availability_pause(self, now: float, duration: float) -> None:
+        candidate_until = now + duration
+        if (
+            self.availability_paused_until is None
+            or candidate_until > self.availability_paused_until
+        ):
+            self.availability_paused_until = candidate_until
+
+    def clear_availability_pause(self) -> None:
+        self.availability_paused_until = None
 
 
 __all__ = [
