@@ -4,6 +4,7 @@ import json
 import logging
 import os
 import re
+import time
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
 from functools import wraps
@@ -17,7 +18,14 @@ from flask_cors import CORS
 from flask_sqlalchemy import SQLAlchemy
 from dotenv import load_dotenv
 
-from results import get_metrics_snapshot, snapshots, start_background_updater
+import requests
+
+from results import (
+    build_output_url,
+    get_metrics_snapshot,
+    snapshots,
+    start_background_updater,
+)
 
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -145,6 +153,11 @@ DEFAULT_BASE_CONFIG = {
 }
 
 LINKS_PATH = "overlay_links.json"
+
+CONTROL_TEST_COMMAND = "GetStatus"
+CONTROL_TEST_TIMEOUT_SECONDS = 5
+CONTROL_TEST_MAX_PAYLOAD_CHARS = 400
+CONTROL_TEST_MAX_PAYLOAD_KEYS = 4
 
 
 def get_config_auth_credentials():
@@ -364,6 +377,40 @@ def overlay_links_by_kort_id():
         link.kort_id: {"overlay": link.overlay_url, "control": link.control_url}
         for link in get_overlay_links()
     }
+
+
+def _control_test_payload_excerpt(response):
+    if response is None:
+        return ""
+
+    try:
+        parsed = response.json()
+    except ValueError:
+        text = (response.text or "").strip()
+        return text[:CONTROL_TEST_MAX_PAYLOAD_CHARS]
+
+    if isinstance(parsed, dict):
+        excerpt_items = []
+        for index, (key, value) in enumerate(parsed.items()):
+            excerpt_items.append((key, value))
+            if index + 1 >= CONTROL_TEST_MAX_PAYLOAD_KEYS:
+                break
+        excerpt_dict = {key: value for key, value in excerpt_items}
+        return json.dumps(excerpt_dict, ensure_ascii=False, indent=2)
+
+    return json.dumps(parsed, ensure_ascii=False)[:CONTROL_TEST_MAX_PAYLOAD_CHARS]
+
+
+def _control_test_response_time_ms(response):
+    elapsed = getattr(response, "elapsed", None)
+    if elapsed is not None:
+        try:
+            total_seconds = elapsed.total_seconds()
+        except Exception:  # noqa: BLE001
+            total_seconds = None
+        if total_seconds is not None:
+            return round(total_seconds * 1000, 2)
+    return None
 
 
 def kort_id_sort_key(value):
@@ -1141,6 +1188,95 @@ def overlay_kort(kort_id):
         mini_config=mini_config,
         mini_label_style=mini_label_style,
     )
+
+
+@app.route("/kort/<int:kort_id>/test", methods=["POST"])
+def kort_control_test(kort_id):
+    kort_id = str(kort_id)
+
+    links = overlay_links_by_kort_id()
+    link = links.get(kort_id)
+    if not link:
+        return f"Nieznany kort {kort_id}", 404
+
+    control_url = link.get("control")
+    if not control_url:
+        result = {
+            "status": "error",
+            "command": CONTROL_TEST_COMMAND,
+            "remote_status": None,
+            "response_time_ms": None,
+            "payload_excerpt": "",
+            "error": "Brak skonfigurowanego adresu panelu sterowania.",
+        }
+        return render_template("partials/control_test_result.html", result=result)
+
+    try:
+        api_url = build_output_url(control_url)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "Nie udało się przygotować adresu testowego dla kortu %s: %s",
+            kort_id,
+            exc,
+        )
+        result = {
+            "status": "error",
+            "command": CONTROL_TEST_COMMAND,
+            "remote_status": None,
+            "response_time_ms": None,
+            "payload_excerpt": "",
+            "error": "Nieprawidłowy adres panelu sterowania.",
+        }
+        return render_template("partials/control_test_result.html", result=result)
+
+    payload = {"command": CONTROL_TEST_COMMAND}
+    response = None
+    start = time.perf_counter()
+
+    try:
+        response = requests.put(
+            api_url,
+            json=payload,
+            timeout=CONTROL_TEST_TIMEOUT_SECONDS,
+        )
+    except requests.RequestException as exc:
+        duration_ms = round((time.perf_counter() - start) * 1000, 2)
+        logger.warning(
+            "Test komendy kontrolnej dla kortu %s zakończył się błędem: %s",
+            kort_id,
+            exc,
+        )
+        result = {
+            "status": "error",
+            "command": CONTROL_TEST_COMMAND,
+            "remote_status": None,
+            "response_time_ms": duration_ms,
+            "payload_excerpt": "",
+            "error": str(exc),
+        }
+        return render_template("partials/control_test_result.html", result=result)
+
+    duration_ms = _control_test_response_time_ms(response)
+    if duration_ms is None:
+        duration_ms = round((time.perf_counter() - start) * 1000, 2)
+
+    payload_excerpt = _control_test_payload_excerpt(response)
+
+    status = "ok" if response.ok else "remote_error"
+    error_message = None
+    if not response.ok:
+        error_message = f"Serwer zwrócił status {response.status_code}."
+
+    result = {
+        "status": status,
+        "command": CONTROL_TEST_COMMAND,
+        "remote_status": response.status_code,
+        "response_time_ms": duration_ms,
+        "payload_excerpt": payload_excerpt,
+        "error": error_message,
+    }
+
+    return render_template("partials/control_test_result.html", result=result)
 
 
 @app.route("/kort/all")
