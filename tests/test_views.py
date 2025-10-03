@@ -1,7 +1,10 @@
 import json
+from datetime import timedelta
 
 import pytest
 from flask import render_template
+
+import requests
 
 import main
 import results
@@ -188,6 +191,104 @@ def test_overlay_kort_uses_new_link(client):
     html = response.get_data(as_text=True)
     assert new_link["overlay"] in html
     assert "Overlay:" in html
+
+
+def test_kort_page_includes_control_test_button(client):
+    kort_id = "60"
+    new_link = {
+        "kort_id": kort_id,
+        "overlay": f"https://app.overlays.uno/output/test{kort_id}",
+        "control": f"https://app.overlays.uno/control/test{kort_id}",
+    }
+    create_response = client.post("/api/overlay-links", json=new_link)
+    assert create_response.status_code == 201
+
+    response = client.get(f"/kort/{kort_id}")
+    assert response.status_code == 200
+    html = response.get_data(as_text=True)
+    assert f"hx-post=\"/kort/{kort_id}/test\"" in html
+    assert "id=\"control-test-result\"" in html
+    assert "Sprawdź panel sterowania" in html
+
+
+def test_kort_control_test_success(client, monkeypatch):
+    kort_id = "61"
+    new_link = {
+        "kort_id": kort_id,
+        "overlay": f"https://app.overlays.uno/output/test{kort_id}",
+        "control": f"https://app.overlays.uno/controlapps/test{kort_id}",
+    }
+    create_response = client.post("/api/overlay-links", json=new_link)
+    assert create_response.status_code == 201
+
+    class DummyResponse:
+        def __init__(self):
+            self.status_code = 200
+            self.elapsed = timedelta(milliseconds=120)
+            self._json = {
+                "status": "ok",
+                "overlay": "on",
+                "extra": {"visibility": "visible"},
+            }
+            self.url = "https://app.overlays.uno/apiv2/controlapps/test/api"
+
+        def json(self):
+            return self._json
+
+        @property
+        def text(self):
+            return json.dumps(self._json)
+
+        @property
+        def ok(self):
+            return True
+
+        def raise_for_status(self):
+            return None
+
+    called = {}
+
+    def fake_put(url, json=None, timeout=None):
+        called["url"] = url
+        called["json"] = json
+        called["timeout"] = timeout
+        return DummyResponse()
+
+    monkeypatch.setattr(main.requests, "put", fake_put)
+
+    response = client.post(f"/kort/{kort_id}/test")
+    assert response.status_code == 200
+    body = response.get_data(as_text=True)
+    assert "HTTP status:" in body
+    assert "200" in body
+    assert "Czas odpowiedzi" in body
+    assert '&#34;status&#34;: &#34;ok&#34;' in body
+    assert called["json"] == {"command": main.CONTROL_TEST_COMMAND}
+    assert called["timeout"] == main.CONTROL_TEST_TIMEOUT_SECONDS
+
+
+def test_kort_control_test_handles_request_error(client, monkeypatch):
+    kort_id = "62"
+    new_link = {
+        "kort_id": kort_id,
+        "overlay": f"https://app.overlays.uno/output/test{kort_id}",
+        "control": f"https://app.overlays.uno/controlapps/test{kort_id}",
+    }
+    create_response = client.post("/api/overlay-links", json=new_link)
+    assert create_response.status_code == 201
+
+    def fake_put(url, json=None, timeout=None):  # noqa: ARG001
+        raise requests.Timeout("timeout during test")
+
+    monkeypatch.setattr(main.requests, "put", fake_put)
+
+    response = client.post(f"/kort/{kort_id}/test")
+    assert response.status_code == 200
+    body = response.get_data(as_text=True)
+    assert "HTTP status:" in body
+    assert "brak" in body
+    assert "Błąd:" in body
+    assert "timeout" in body.lower()
 
 
 def test_overlay_links_page_renders(client):
