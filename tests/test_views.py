@@ -80,6 +80,26 @@ def test_wyniki_view_localizes_last_updated(client, tmp_path, monkeypatch):
     assert 'title="2024-07-01T14:32:00Z"' in html
 
 
+def test_wyniki_hides_hidden_and_marks_disabled(client):
+    with flask_app.app_context():
+        main.ensure_overlay_links_seeded()
+        link1 = OverlayLink.query.filter_by(kort_id="1").first()
+        link2 = OverlayLink.query.filter_by(kort_id="2").first()
+        assert link1 is not None and link2 is not None
+        link1.enabled = False
+        link1.hidden = False
+        link2.hidden = True
+        main.db.session.commit()
+
+    response = client.get("/wyniki")
+    assert response.status_code == 200
+    html = response.get_data(as_text=True)
+
+    assert "status-disabled" in html
+    assert "Wyłączony" in html
+    assert "Kort 2" not in html
+
+
 def test_config_page_renders(client, auth_headers):
     response = client.get("/config", headers=auth_headers)
     assert response.status_code == 200
@@ -103,11 +123,34 @@ def test_overlay_links_api_create_and_list(client):
     assert response.status_code == 201
     created = response.get_json()
     assert created["kort_id"] == payload["kort_id"]
+    assert created["enabled"] is True
+    assert created["hidden"] is False
 
     list_response = client.get("/api/overlay-links")
     assert list_response.status_code == 200
     links = list_response.get_json()
-    assert any(link["kort_id"] == payload["kort_id"] for link in links)
+    assert any(link["kort_id"] == payload["kort_id"] and link["enabled"] is True for link in links)
+
+
+def test_overlay_links_api_accepts_flags(client):
+    payload = {
+        "kort_id": "104",
+        "overlay": "https://app.overlays.uno/output/test104",
+        "control": "https://app.overlays.uno/control/test104",
+        "enabled": False,
+        "hidden": True,
+    }
+
+    response = client.post("/api/overlay-links", json=payload)
+    assert response.status_code == 201
+    created = response.get_json()
+    assert created["enabled"] is False
+    assert created["hidden"] is True
+
+    list_response = client.get("/api/overlay-links")
+    flags = next(link for link in list_response.get_json() if link["kort_id"] == payload["kort_id"])
+    assert flags["enabled"] is False
+    assert flags["hidden"] is True
 
 
 def test_overlay_links_api_rejects_invalid_scheme(client):
@@ -159,6 +202,20 @@ def test_overlay_links_api_rejects_invalid_control_path(client):
         errors["control"]
         == "Adres panelu sterowania musi mieć ścieżkę w formacie /control/{id} lub /controlapps/{id}."
     )
+
+
+def test_overlay_links_api_rejects_invalid_enabled_flag(client):
+    payload = {
+        "kort_id": "105",
+        "overlay": "https://app.overlays.uno/output/test105",
+        "control": "https://app.overlays.uno/control/test105",
+        "enabled": "invalid",
+    }
+
+    response = client.post("/api/overlay-links", json=payload)
+    assert response.status_code == 400
+    errors = response.get_json()["errors"]
+    assert errors["enabled"] == "Pole enabled musi być wartością logiczną (true/false)."
 
 
 def test_index_renders_links_from_database(client):
@@ -303,10 +360,14 @@ def test_overlay_links_reload_updates_database(client, auth_headers, tmp_path, m
         "1": {
             "overlay": "https://app.overlays.uno/output/test-initial-1",
             "control": "https://app.overlays.uno/control/test-initial-1",
+            "enabled": False,
+            "hidden": True,
         },
         "2": {
             "overlay": "https://app.overlays.uno/output/test-initial-2",
             "control": "https://app.overlays.uno/control/test-initial-2",
+            "enabled": True,
+            "hidden": False,
         },
     }
     json_path.write_text(json.dumps(initial_data))
@@ -321,10 +382,14 @@ def test_overlay_links_reload_updates_database(client, auth_headers, tmp_path, m
         "2": {
             "overlay": "https://app.overlays.uno/output/test-updated-2",
             "control": "https://app.overlays.uno/control/test-updated-2",
+            "enabled": False,
+            "hidden": True,
         },
         "3": {
             "overlay": "https://app.overlays.uno/output/test-new-3",
             "control": "https://app.overlays.uno/controlapps/test-new-3",
+            "enabled": True,
+            "hidden": False,
         },
     }
     json_path.write_text(json.dumps(updated_data))
@@ -340,8 +405,12 @@ def test_overlay_links_reload_updates_database(client, auth_headers, tmp_path, m
     assert set(links.keys()) == {"2", "3"}
     assert links["2"].overlay_url == updated_data["2"]["overlay"]
     assert links["2"].control_url == updated_data["2"]["control"]
+    assert links["2"].enabled is False
+    assert links["2"].hidden is True
     assert links["3"].overlay_url == updated_data["3"]["overlay"]
     assert links["3"].control_url == updated_data["3"]["control"]
+    assert links["3"].enabled is True
+    assert links["3"].hidden is False
 
 
 def test_debug_metrics_endpoint_counts(client):

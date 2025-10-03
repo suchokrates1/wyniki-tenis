@@ -836,6 +836,28 @@ def test_update_once_cycles_commands_and_transitions(monkeypatch):
             assert trailing_diffs and all(diff == 1 for diff in trailing_diffs)
 
 
+
+def test_update_once_skips_disabled_courts(monkeypatch):
+    snapshots.clear()
+    results_module.court_states.clear()
+
+    overlay_links = {
+        "1": {
+            "control": "https://app.overlays.uno/control/disabled",
+            "enabled": False,
+        }
+    }
+
+    def supplier():
+        return overlay_links
+
+    session = DummySession(DummyResponse({}, status_code=200))
+
+    results_module._update_once(app, supplier, session=session, now=0.0)
+
+    assert session.requests == []
+    assert "1" not in results_module.court_states
+
 def test_update_once_logs_successful_payload(monkeypatch, caplog):
     snapshots.clear()
     results_module.court_states.clear()
@@ -1172,4 +1194,21 @@ def test_update_once_handles_404_with_cooldown_and_badge(monkeypatch):
     final_snapshot = snapshots["1"]
     assert final_snapshot.get("badges") == []
     assert fake_time.sleep_calls == []
+
+
+def test_normalize_snapshot_entry_marks_disabled_status():
+    snapshot = {
+        "status": "ok",
+        "available": True,
+        "players": [],
+    }
+    link_meta = {"enabled": False, "hidden": True}
+
+    normalized = normalize_snapshot_entry("7", snapshot, link_meta)
+
+    assert normalized["status"] == "disabled"
+    assert normalized["status_label"] == "Wyłączony"
+    assert normalized["overlay_is_on"] is False
+    assert normalized["enabled"] is False
+    assert normalized["hidden"] is True
 
