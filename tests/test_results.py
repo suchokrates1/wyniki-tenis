@@ -926,6 +926,57 @@ def test_update_once_respects_rate_limit_cooldown(monkeypatch):
     assert snapshot["players"]["A"]["points"] == "15"
 
 
+def test_update_once_switches_polling_when_overlay_unavailable(monkeypatch):
+    snapshots.clear()
+    results_module.court_states.clear()
+
+    overlay_links = {
+        "1": {"control": "https://app.overlays.uno/control/slow"}
+    }
+
+    def supplier():
+        return overlay_links
+
+    unavailable_payload = {"OverlayVisibility": "off"}
+    available_payload = {"OverlayVisibility": "on"}
+    session = SequenceSession(
+        [
+            DummyResponse(unavailable_payload, status_code=200),
+            DummyResponse(available_payload, status_code=200),
+        ]
+    )
+
+    fake_time = TimeController(start=200.0)
+    monkeypatch.setattr(results_module.time, "time", fake_time.time)
+    monkeypatch.setattr(results_module.time, "sleep", fake_time.sleep)
+    monkeypatch.setattr(results_module.random, "uniform", lambda *_: 0.0)
+    monkeypatch.setattr(results_state_machine, "_default_offset", lambda *_: 0.0)
+
+    start = fake_time.time()
+    results_module._update_once(app, supplier, session=session, now=start)
+
+    state = results_module.court_states["1"]
+    assert len(session.requests) == 1
+    assert state.availability_paused_until is not None
+    assert state.availability_paused_until == pytest.approx(
+        start + results_module.UNAVAILABLE_SLOW_POLL_SECONDS, rel=1e-6
+    )
+    assert state.is_paused(start)
+
+    fake_time.current = start + 10.0
+    results_module._update_once(app, supplier, session=session, now=fake_time.time())
+
+    assert len(session.requests) == 1
+    assert state.is_paused(fake_time.current)
+
+    fake_time.current = start + results_module.UNAVAILABLE_SLOW_POLL_SECONDS + 1.0
+    results_module._update_once(app, supplier, session=session, now=fake_time.time())
+
+    assert len(session.requests) == 2
+    assert state.availability_paused_until is None
+    assert not state.is_paused(fake_time.current)
+
+
 def test_update_once_logs_details_on_retry_exhaustion(monkeypatch, caplog):
     snapshots.clear()
     results_module.court_states.clear()
