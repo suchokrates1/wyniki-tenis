@@ -874,6 +874,73 @@ def test_update_once_logs_successful_payload(monkeypatch, caplog):
     assert "super-secret-token" not in message
 
 
+def test_update_once_emits_json_logs_with_request_id(monkeypatch, caplog):
+    snapshots.clear()
+    results_module.court_states.clear()
+
+    overlay_links = {"1": {"control": "https://app.overlays.uno/control/json"}}
+
+    def supplier():
+        return overlay_links
+
+    failing_response = DummyResponse({}, status_code=500)
+    success_response = DummyResponse({}, status_code=200)
+    extra_response = DummyResponse({}, status_code=200)
+    session = SequenceSession(
+        [failing_response, success_response, extra_response, extra_response]
+    )
+
+    fake_time = TimeController(start=42.0)
+    monkeypatch.setattr(results_module.time, "time", fake_time.time)
+    monkeypatch.setattr(results_module.time, "sleep", fake_time.sleep)
+    monkeypatch.setattr(results_module.random, "uniform", lambda *_: 0.0)
+    monkeypatch.setattr(results_state_machine, "_default_offset", lambda *_: 0.0)
+
+    caplog.set_level("INFO", logger=results_module.logger.name)
+
+    results_module._update_once(app, supplier, session=session, now=fake_time.time())
+
+    info_logs: list[dict[str, object]] = []
+    for record in caplog.records:
+        if record.name != results_module.logger.name or record.levelno != logging.INFO:
+            continue
+        try:
+            payload = json.loads(record.getMessage())
+        except json.JSONDecodeError:
+            continue
+        info_logs.append(payload)
+
+    assert info_logs, f"Brak logów JSON w caplog: {caplog.text}"
+
+    grouped: dict[str, list[dict[str, object]]] = {}
+    for entry in info_logs:
+        request_id = entry.get("request_id")
+        if not isinstance(request_id, str):
+            continue
+        grouped.setdefault(request_id, []).append(entry)
+
+    matching_entries: list[dict[str, object]] | None = None
+    for entries in grouped.values():
+        if len(entries) < 2:
+            continue
+        statuses = {entry.get("status_code") for entry in entries}
+        if 500 in statuses and 200 in statuses:
+            matching_entries = sorted(entries, key=lambda item: (bool(item.get("retry")), item.get("status_code")))
+            break
+
+    assert matching_entries is not None, f"Brak kompletnego wpisu retry w logach: {info_logs}"
+
+    first_attempt, second_attempt = matching_entries[:2]
+    assert first_attempt.get("kort_id") == second_attempt.get("kort_id") == "1"
+    assert first_attempt.get("status_code") == 500
+    assert second_attempt.get("status_code") == 200
+    assert not first_attempt.get("retry")
+    assert second_attempt.get("retry")
+    assert first_attempt.get("request_id") == second_attempt.get("request_id")
+    assert first_attempt.get("duration_ms") is not None
+    assert second_attempt.get("duration_ms") is not None
+
+
 def test_update_once_respects_rate_limit_cooldown(monkeypatch):
     snapshots.clear()
     results_module.court_states.clear()

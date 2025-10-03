@@ -5,6 +5,7 @@ import random
 import re
 import threading
 import time
+import uuid
 from collections import deque
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
@@ -1196,192 +1197,209 @@ def _update_once(
 
         command_succeeded = False
 
+        request_id = uuid.uuid4().hex
+
         while True:
             response: Optional[requests.Response] = None
             should_retry = False
+            attempt_started = time.perf_counter()
+            status_code: Optional[int] = None
             try:
-                _throttle_request(controlapp_identifier, current_time=current_time)
-                response = http.put(
-                    base_url,
-                    json=payload,
-                    timeout=REQUEST_TIMEOUT_SECONDS,
-                )
-                rate_limits_desc = _format_rate_limit_headers(response)
-                logger.debug(
-                    "Żądanie %s %s zakończone statusem %s%s",
-                    "PUT",
-                    response.url,
-                    response.status_code,
-                    rate_limits_desc,
-                )
-            except requests.Timeout as exc:
-                should_retry = True
-                last_error = str(exc)
-                last_response = None
-            except Exception as exc:  # noqa: BLE001
-                logger.warning(
-                    "Nie udało się pobrać komendy %s dla kortu %s: %s",
-                    command,
-                    kort_id,
-                    exc,
-                )
-                final_snapshot = _handle_command_error(
-                    kort_id,
-                    error=str(exc),
-                    state=state,
-                    now=current_time,
-                    spec_name=spec_name,
-                )
-                break
-
-            if response is not None:
-                status_code = response.status_code
-
-                if status_code == 404:
-                    diagnostics = _format_http_error_details(command, response)
-                    cooldown_until = current_time + NOT_FOUND_COOLDOWN_SECONDS
-                    _schedule_controlapp_resume(controlapp_identifier, cooldown_until)
-                    cooldown_seconds = max(0.0, cooldown_until - current_time)
-                    resume_iso = datetime.fromtimestamp(
-                        cooldown_until, timezone.utc
-                    ).isoformat()
-                    logger.warning(
-                        (
-                            "Serwer zwrócił 404 dla kortu %s (%s) - "
-                            "pauza %.0f s (do %s) (%s)%s"
-                        ),
-                        kort_id,
-                        command,
-                        cooldown_seconds,
-                        resume_iso,
-                        diagnostics,
+                try:
+                    _throttle_request(controlapp_identifier, current_time=current_time)
+                    response = http.put(
+                        base_url,
+                        json=payload,
+                        timeout=REQUEST_TIMEOUT_SECONDS,
+                    )
+                    rate_limits_desc = _format_rate_limit_headers(response)
+                    logger.debug(
+                        "Żądanie %s %s zakończone statusem %s%s",
+                        "PUT",
+                        response.url,
+                        response.status_code,
                         rate_limits_desc,
                     )
-                    final_snapshot = _handle_command_error(
-                        kort_id,
-                        error=diagnostics,
-                        state=state,
-                        now=current_time,
-                        spec_name=spec_name,
-                        badges=[NOT_FOUND_BADGE],
-                    )
-                    break
-
-                if status_code == 400:
-                    diagnostics = _format_http_error_details(command, response)
-                    logger.warning(
-                        "Serwer zwrócił błąd 400 dla kortu %s (%s): %s",
-                        kort_id,
-                        command,
-                        diagnostics,
-                    )
-                    final_snapshot = _handle_command_error(
-                        kort_id,
-                        error=diagnostics,
-                        state=state,
-                        now=current_time,
-                        spec_name=spec_name,
-                    )
-                    break
-
-                if 400 <= status_code < 500 and status_code not in {404, 429}:
-                    diagnostics = _format_http_error_details(command, response)
-                    logger.warning(
-                        "Serwer zwrócił błąd %s dla kortu %s (%s): %s",
-                        status_code,
-                        kort_id,
-                        command,
-                        diagnostics,
-                    )
-                    final_snapshot = _handle_command_error(
-                        kort_id,
-                        error=diagnostics,
-                        state=state,
-                        now=current_time,
-                        spec_name=spec_name,
-                    )
-                    break
-
-                if status_code == 429:
-                    retry_after_header = None
-                    reset_header = None
-                    try:
-                        retry_after_header = response.headers.get("Retry-After")
-                        reset_header = response.headers.get("X-RateLimit-Reset")
-                    except Exception:  # noqa: BLE001
-                        pass
-
-                    retry_after_seconds = _parse_retry_after(response)
-                    reset_timestamp = _parse_rate_limit_reset(
-                        response, reference_time=current_time
-                    )
-                    cooldown_candidates: List[float] = []
-                    if retry_after_seconds is not None:
-                        cooldown_candidates.append(current_time + retry_after_seconds)
-                    if reset_timestamp is not None:
-                        cooldown_candidates.append(max(current_time, reset_timestamp))
-
-                    if cooldown_candidates:
-                        cooldown_until = max(cooldown_candidates)
-                    else:
-                        cooldown_until = current_time + PER_CONTROLAPP_MIN_INTERVAL_SECONDS
-
-                    _schedule_controlapp_resume(controlapp_identifier, cooldown_until)
-
-                    cooldown_seconds = max(0.0, cooldown_until - current_time)
-                    reset_iso = datetime.fromtimestamp(
-                        cooldown_until, timezone.utc
-                    ).isoformat()
-                    logger.warning(
-                        (
-                            "Serwer zwrócił 429 dla kortu %s (%s) - "
-                            "pauza %.2f s (Retry-After=%s, X-RateLimit-Reset=%s, do=%s)%s"
-                        ),
-                        kort_id,
-                        command,
-                        cooldown_seconds,
-                        retry_after_header or "brak",
-                        reset_header or "brak",
-                        reset_iso,
-                        rate_limits_desc,
-                    )
-                    break
-
-                if status_code >= 500:
+                    status_code = response.status_code
+                except requests.Timeout as exc:
                     should_retry = True
-                    last_error = _format_http_error_details(command, response)
-                    last_response = response
-                else:
-                    try:
-                        response.raise_for_status()
-                        payload = response.json()
-                    except Exception as exc:  # noqa: BLE001
+                    last_error = str(exc)
+                    last_response = None
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning(
+                        "Nie udało się pobrać komendy %s dla kortu %s: %s",
+                        command,
+                        kort_id,
+                        exc,
+                    )
+                    final_snapshot = _handle_command_error(
+                        kort_id,
+                        error=str(exc),
+                        state=state,
+                        now=current_time,
+                        spec_name=spec_name,
+                    )
+                    break
+
+                if response is not None:
+                    if status_code == 404:
+                        diagnostics = _format_http_error_details(command, response)
+                        cooldown_until = current_time + NOT_FOUND_COOLDOWN_SECONDS
+                        _schedule_controlapp_resume(controlapp_identifier, cooldown_until)
+                        cooldown_seconds = max(0.0, cooldown_until - current_time)
+                        resume_iso = datetime.fromtimestamp(
+                            cooldown_until, timezone.utc
+                        ).isoformat()
                         logger.warning(
-                            "Nie udało się pobrać komendy %s dla kortu %s: %s",
-                            command,
+                            (
+                                "Serwer zwrócił 404 dla kortu %s (%s) - "
+                                "pauza %.0f s (do %s) (%s)%s"
+                            ),
                             kort_id,
-                            exc,
+                            command,
+                            cooldown_seconds,
+                            resume_iso,
+                            diagnostics,
+                            rate_limits_desc,
                         )
                         final_snapshot = _handle_command_error(
                             kort_id,
-                            error=str(exc),
+                            error=diagnostics,
+                            state=state,
+                            now=current_time,
+                            spec_name=spec_name,
+                            badges=[NOT_FOUND_BADGE],
+                        )
+                        break
+
+                    if status_code == 400:
+                        diagnostics = _format_http_error_details(command, response)
+                        logger.warning(
+                            "Serwer zwrócił błąd 400 dla kortu %s (%s): %s",
+                            kort_id,
+                            command,
+                            diagnostics,
+                        )
+                        final_snapshot = _handle_command_error(
+                            kort_id,
+                            error=diagnostics,
                             state=state,
                             now=current_time,
                             spec_name=spec_name,
                         )
                         break
 
-                    logger.debug(
-                        "Odpowiedź komendy %s dla kortu %s: %s%s",
-                        command,
-                        kort_id,
-                        _format_payload_for_logging(payload),
-                        rate_limits_desc,
-                    )
-                    flattened = _flatten_overlay_payload(payload)
-                    final_snapshot = _merge_partial_payload(kort_id, flattened)
-                    command_succeeded = True
-                    break
+                    if 400 <= status_code < 500 and status_code not in {404, 429}:
+                        diagnostics = _format_http_error_details(command, response)
+                        logger.warning(
+                            "Serwer zwrócił błąd %s dla kortu %s (%s): %s",
+                            status_code,
+                            kort_id,
+                            command,
+                            diagnostics,
+                        )
+                        final_snapshot = _handle_command_error(
+                            kort_id,
+                            error=diagnostics,
+                            state=state,
+                            now=current_time,
+                            spec_name=spec_name,
+                        )
+                        break
+
+                    if status_code == 429:
+                        retry_after_header = None
+                        reset_header = None
+                        try:
+                            retry_after_header = response.headers.get("Retry-After")
+                            reset_header = response.headers.get("X-RateLimit-Reset")
+                        except Exception:  # noqa: BLE001
+                            pass
+
+                        retry_after_seconds = _parse_retry_after(response)
+                        reset_timestamp = _parse_rate_limit_reset(
+                            response, reference_time=current_time
+                        )
+                        cooldown_candidates: List[float] = []
+                        if retry_after_seconds is not None:
+                            cooldown_candidates.append(current_time + retry_after_seconds)
+                        if reset_timestamp is not None:
+                            cooldown_candidates.append(max(current_time, reset_timestamp))
+
+                        if cooldown_candidates:
+                            cooldown_until = max(cooldown_candidates)
+                        else:
+                            cooldown_until = (
+                                current_time + PER_CONTROLAPP_MIN_INTERVAL_SECONDS
+                            )
+
+                        _schedule_controlapp_resume(controlapp_identifier, cooldown_until)
+
+                        cooldown_seconds = max(0.0, cooldown_until - current_time)
+                        reset_iso = datetime.fromtimestamp(
+                            cooldown_until, timezone.utc
+                        ).isoformat()
+                        logger.warning(
+                            (
+                                "Serwer zwrócił 429 dla kortu %s (%s) - "
+                                "pauza %.2f s (Retry-After=%s, X-RateLimit-Reset=%s, do=%s)%s"
+                            ),
+                            kort_id,
+                            command,
+                            cooldown_seconds,
+                            retry_after_header or "brak",
+                            reset_header or "brak",
+                            reset_iso,
+                            rate_limits_desc,
+                        )
+                        break
+
+                    if status_code >= 500:
+                        should_retry = True
+                        last_error = _format_http_error_details(command, response)
+                        last_response = response
+                    else:
+                        try:
+                            response.raise_for_status()
+                            payload = response.json()
+                        except Exception as exc:  # noqa: BLE001
+                            logger.warning(
+                                "Nie udało się pobrać komendy %s dla kortu %s: %s",
+                                command,
+                                kort_id,
+                                exc,
+                            )
+                            final_snapshot = _handle_command_error(
+                                kort_id,
+                                error=str(exc),
+                                state=state,
+                                now=current_time,
+                                spec_name=spec_name,
+                            )
+                            break
+
+                        logger.debug(
+                            "Odpowiedź komendy %s dla kortu %s: %s%s",
+                            command,
+                            kort_id,
+                            _format_payload_for_logging(payload),
+                            rate_limits_desc,
+                        )
+                        flattened = _flatten_overlay_payload(payload)
+                        final_snapshot = _merge_partial_payload(kort_id, flattened)
+                        command_succeeded = True
+                        break
+            finally:
+                duration_ms = (time.perf_counter() - attempt_started) * 1000.0
+                log_payload = {
+                    "kort_id": kort_id,
+                    "command": command,
+                    "status_code": status_code,
+                    "duration_ms": duration_ms,
+                    "retry": attempt > 0,
+                    "request_id": request_id,
+                }
+                logger.info(json.dumps(log_payload, ensure_ascii=False))
 
             if should_retry:
                 if attempt >= MAX_RETRY_ATTEMPTS:
