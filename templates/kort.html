@@ -167,7 +167,7 @@
     <span class="pause-indicator">{{ snapshot.pause_label }}</span>
     {% endif %}
     {% if snapshot.last_updated %}
-    <time class="status-info" datetime="{{ snapshot.last_updated }}">Ostatnia aktualizacja: {{ snapshot.last_updated }}</time>
+    <time class="status-info"{% if snapshot.last_updated_iso %} datetime="{{ snapshot.last_updated_iso }}" title="{{ snapshot.last_updated_iso }}"{% endif %}>Ostatnia aktualizacja: {{ snapshot.last_updated }}</time>
     {% else %}
     <span class="status-info">Ostatnia aktualizacja: brak danych</span>
     {% endif %}
@@ -250,7 +250,7 @@
               <span class="pause-indicator" style="font-size: 0.7rem; padding: 0.2rem 0.5rem;">{{ mini.pause_label }}</span>
               {% endif %}
               {% if mini.last_updated %}
-              <time datetime="{{ mini.last_updated }}">Ostatnia aktualizacja: {{ mini.last_updated }}</time>
+              <time{% if mini.last_updated_iso %} datetime="{{ mini.last_updated_iso }}" title="{{ mini.last_updated_iso }}"{% endif %}>Ostatnia aktualizacja: {{ mini.last_updated }}</time>
               {% else %}
               <span>Ostatnia aktualizacja: brak danych</span>
               {% endif %}

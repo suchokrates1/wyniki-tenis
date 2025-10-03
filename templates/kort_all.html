@@ -126,7 +126,7 @@
           <span class="pause-indicator">{{ kort.pause_label }}</span>
           {% endif %}
           {% if kort.last_updated %}
-          <time datetime="{{ kort.last_updated }}">Ostatnia aktualizacja: {{ kort.last_updated }}</time>
+          <time{% if kort.last_updated_iso %} datetime="{{ kort.last_updated_iso }}" title="{{ kort.last_updated_iso }}"{% endif %}>Ostatnia aktualizacja: {{ kort.last_updated }}</time>
           {% else %}
           <span>Ostatnia aktualizacja: brak danych</span>
           {% endif %}
