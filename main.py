@@ -1,4 +1,5 @@
 import copy
+import ipaddress
 import json
 import logging
 import os
@@ -14,7 +15,7 @@ from flask_cors import CORS
 from flask_sqlalchemy import SQLAlchemy
 from dotenv import load_dotenv
 
-from results import snapshots, start_background_updater
+from results import get_metrics_snapshot, snapshots, start_background_updater
 
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -172,6 +173,24 @@ def requires_config_auth(view_func):
         return unauthorized_response()
 
     return wrapper
+
+
+def _is_local_request() -> bool:
+    remote_addr = request.remote_addr or ""
+    try:
+        ip = ipaddress.ip_address(remote_addr)
+    except ValueError:
+        return remote_addr.startswith("127.")
+    return ip.is_loopback
+
+
+@app.route("/debug/metrics")
+def debug_metrics():
+    if not _is_local_request():
+        response = jsonify({"error": "forbidden"})
+        response.status_code = 403
+        return response
+    return jsonify(get_metrics_snapshot())
 
 
 class OverlayConfig(db.Model):

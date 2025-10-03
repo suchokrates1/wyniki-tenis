@@ -4,6 +4,7 @@ import pytest
 from flask import render_template
 
 import main
+import results
 from main import app as flask_app, OverlayLink
 
 
@@ -212,6 +213,41 @@ def test_overlay_links_reload_updates_database(client, auth_headers, tmp_path, m
     assert links["3"].overlay_url == updated_data["3"]["overlay"]
     assert links["3"].control_url == updated_data["3"]["control"]
 
+
+def test_debug_metrics_endpoint_counts(client):
+    results.reset_metrics()
+
+    first_response = client.get("/debug/metrics")
+    assert first_response.status_code == 200
+    first_payload = first_response.get_json()
+
+    assert set(first_payload.keys()) >= {
+        "started_at",
+        "ticks_total",
+        "responses",
+        "retries",
+        "snapshots",
+    }
+    assert isinstance(first_payload["responses"], dict)
+    assert isinstance(first_payload["responses"]["by_status_code"], dict)
+    assert isinstance(first_payload["responses"]["by_error"], dict)
+
+    results._record_tick()
+    results._record_response_event(status_code=200)
+    results._record_retry_event("Timeout")
+    results._record_snapshot_metrics({"status": results.SNAPSHOT_STATUS_OK})
+
+    second_response = client.get("/debug/metrics")
+    assert second_response.status_code == 200
+    second_payload = second_response.get_json()
+
+    assert second_payload["ticks_total"] == first_payload["ticks_total"] + 1
+    assert second_payload["responses"]["total"] == first_payload["responses"]["total"] + 1
+    assert second_payload["responses"]["by_status_code"].get("200") == (
+        first_payload["responses"]["by_status_code"].get("200", 0) + 1
+    )
+    assert second_payload["retries"]["total"] == first_payload["retries"]["total"] + 1
+    assert second_payload["snapshots"]["total"] == first_payload["snapshots"]["total"] + 1
 
 def test_overlay_links_reload_requires_authentication(client):
     response = client.post("/api/overlay-links/reload")

@@ -158,16 +158,95 @@ snapshots_lock = threading.Lock()
 snapshots: Dict[str, Dict[str, Any]] = {}
 
 states_lock = threading.Lock()
+
+metrics_lock = threading.Lock()
+
+
+def _now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _initial_metrics_state() -> Dict[str, Any]:
+    return {
+        "started_at": _now_iso(),
+        "last_response_at": None,
+        "last_retry_at": None,
+        "last_snapshot_at": None,
+        "last_tick_at": None,
+        "ticks_total": 0,
+        "responses": {
+            "total": 0,
+            "by_status_code": {},
+            "by_error": {},
+        },
+        "retries": {
+            "total": 0,
+            "by_reason": {},
+        },
+        "snapshots": {
+            "total": 0,
+            "by_status": {},
+        },
+    }
+
+
+metrics: Dict[str, Any] = _initial_metrics_state()
+
+
+def reset_metrics() -> None:
+    with metrics_lock:
+        metrics.clear()
+        metrics.update(_initial_metrics_state())
+
+
+def _increment_counter(storage: Dict[str, int], key: str) -> None:
+    storage[key] = storage.get(key, 0) + 1
+
+
+def _record_response_event(*, status_code: Optional[int] = None, error: Optional[str] = None) -> None:
+    with metrics_lock:
+        metrics["responses"]["total"] += 1
+        metrics["last_response_at"] = _now_iso()
+        if status_code is not None:
+            bucket = metrics["responses"]["by_status_code"]
+            _increment_counter(bucket, str(status_code))
+        elif error is not None:
+            bucket = metrics["responses"]["by_error"]
+            _increment_counter(bucket, error)
+
+
+def _record_retry_event(reason: str) -> None:
+    with metrics_lock:
+        metrics["retries"]["total"] += 1
+        metrics["last_retry_at"] = _now_iso()
+        bucket = metrics["retries"]["by_reason"]
+        _increment_counter(bucket, reason)
+
+
+def _record_snapshot_metrics(snapshot: Dict[str, Any]) -> None:
+    status = snapshot.get("status") or "unknown"
+    with metrics_lock:
+        metrics["snapshots"]["total"] += 1
+        metrics["last_snapshot_at"] = _now_iso()
+        bucket = metrics["snapshots"]["by_status"]
+        _increment_counter(bucket, str(status))
+
+
+def _record_tick() -> None:
+    with metrics_lock:
+        metrics["ticks_total"] += 1
+        metrics["last_tick_at"] = _now_iso()
+
+
+def get_metrics_snapshot() -> Dict[str, Any]:
+    with metrics_lock:
+        return copy.deepcopy(metrics)
 court_states: Dict[str, CourtState] = {}
 
 _throttle_lock = threading.Lock()
 _last_request_by_controlapp: Dict[str, float] = {}
 _recent_request_timestamps: Deque[float] = deque()
 _next_allowed_request_by_controlapp: Dict[str, float] = {}
-
-
-def _now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat()
 
 
 def _shorten_for_logging(text: str, max_length: int = 256) -> str:
@@ -1152,8 +1231,10 @@ def _update_once(
                 state=state,
                 now=current_time,
             )
+            _record_snapshot_metrics(snapshot)
             _process_snapshot(state, snapshot, current_time)
             state.tick_counter += 1
+            _record_tick()
             continue
 
         cooldown_until = _controlapp_cooldown_until(controlapp_identifier, current_time)
@@ -1165,6 +1246,7 @@ def _update_once(
                 remaining,
             )
             state.tick_counter += 1
+            _record_tick()
             continue
 
         if state.is_paused(current_time):
@@ -1176,6 +1258,7 @@ def _update_once(
                 remaining,
             )
             state.tick_counter += 1
+            _record_tick()
             continue
 
         spec_name = state.pop_due_command(current_time)
@@ -1185,6 +1268,7 @@ def _update_once(
         command = _select_command(state, spec_name)
         if not command:
             state.tick_counter += 1
+            _record_tick()
             state.mark_polled(current_time)
             continue
 
@@ -1194,6 +1278,7 @@ def _update_once(
         final_snapshot: Optional[Dict[str, Any]] = None
         last_error: Optional[str] = None
         last_response: Optional[requests.Response] = None
+        last_error_label: Optional[str] = None
 
         command_succeeded = False
 
@@ -1225,6 +1310,8 @@ def _update_once(
                     should_retry = True
                     last_error = str(exc)
                     last_response = None
+                    last_error_label = exc.__class__.__name__
+                    _record_response_event(error="timeout")
                 except Exception as exc:  # noqa: BLE001
                     logger.warning(
                         "Nie udało się pobrać komendy %s dla kortu %s: %s",
@@ -1232,6 +1319,8 @@ def _update_once(
                         kort_id,
                         exc,
                     )
+                    last_error_label = exc.__class__.__name__
+                    _record_response_event(error="exception")
                     final_snapshot = _handle_command_error(
                         kort_id,
                         error=str(exc),
@@ -1242,6 +1331,7 @@ def _update_once(
                     break
 
                 if response is not None:
+                    _record_response_event(status_code=status_code)
                     if status_code == 404:
                         diagnostics = _format_http_error_details(command, response)
                         cooldown_until = current_time + NOT_FOUND_COOLDOWN_SECONDS
@@ -1358,6 +1448,7 @@ def _update_once(
                         should_retry = True
                         last_error = _format_http_error_details(command, response)
                         last_response = response
+                        last_error_label = f"HTTP_{status_code}"
                     else:
                         try:
                             response.raise_for_status()
@@ -1402,6 +1493,10 @@ def _update_once(
                 logger.info(json.dumps(log_payload, ensure_ascii=False))
 
             if should_retry:
+                retry_reason = last_error_label or (
+                    f"HTTP_{response.status_code}" if response is not None else "unknown"
+                )
+                _record_retry_event(str(retry_reason))
                 if attempt >= MAX_RETRY_ATTEMPTS:
                     payload_summary = _format_payload_for_logging(payload)
                     diagnostics = last_error
@@ -1455,9 +1550,11 @@ def _update_once(
             state.clear_pause()
 
         if final_snapshot is not None:
+            _record_snapshot_metrics(final_snapshot)
             _process_snapshot(state, final_snapshot, current_time)
 
         state.tick_counter += 1
+        _record_tick()
 
 
 _thread: Optional[threading.Thread] = None
@@ -1504,7 +1601,9 @@ __all__ = [
     "SNAPSHOT_STATUS_UNAVAILABLE",
     "build_output_url",
     "ensure_snapshot_entry",
+    "get_metrics_snapshot",
     "parse_overlay_json",
+    "reset_metrics",
     "snapshots",
     "start_background_updater",
     "update_snapshot_for_kort",
