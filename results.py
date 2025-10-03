@@ -1198,7 +1198,7 @@ def _mark_unavailable(kort_id: str, *, error: Optional[str]) -> Dict[str, Any]:
 
 def _update_once(
     app,
-    overlay_links_supplier: Callable[[], Dict[str, Dict[str, str]]],
+    overlay_links_supplier: Callable[[], Dict[str, Dict[str, Any]]],
     *,
     session: Optional[requests.sessions.Session] = None,
     now: Optional[float] = None,
@@ -1212,6 +1212,10 @@ def _update_once(
         return
 
     for kort_id, urls in links.items():
+        if not (urls or {}).get("enabled", True):
+            logger.debug("Pominięto kort %s - polling wyłączony", kort_id)
+            continue
+
         ensure_snapshot_entry(kort_id)
         state = _ensure_court_state(kort_id)
         control_url = (urls or {}).get("control")

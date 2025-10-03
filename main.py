@@ -18,6 +18,9 @@ from flask_cors import CORS
 from flask_sqlalchemy import SQLAlchemy
 from dotenv import load_dotenv
 
+from sqlalchemy import inspect, text
+from sqlalchemy.sql import expression
+
 import requests
 
 from results import (
@@ -114,13 +117,14 @@ ACTIVE_STATUSES = {
 STATUS_LABELS = {
     "active": "W trakcie",
     "finished": "Zakończony",
+    "disabled": "Wyłączony",
     "unavailable": "Niedostępny",
     "brak_danych": "Brak danych",
 }
 
 UNAVAILABLE_STATUSES = {"unavailable", "niedostępny", "niedostepny"}
 NO_DATA_STATUSES = {"brak danych", "brak_danych", "no data", "no_data"}
-STATUS_ORDER = ["active", "finished", "unavailable", "brak_danych"]
+STATUS_ORDER = ["active", "finished", "disabled", "unavailable", "brak_danych"]
 STATUS_VIEW_META = {
     "active": {
         "title": "Aktywne mecze",
@@ -131,6 +135,11 @@ STATUS_VIEW_META = {
         "title": "Zakończone mecze",
         "caption": "Zakończone spotkania",
         "empty_message": "Brak zakończonych meczów do wyświetlenia.",
+    },
+    "disabled": {
+        "title": "Wyłączone korty",
+        "caption": "Korty z zatrzymanym odpytywaniem",
+        "empty_message": "Brak wyłączonych kortów.",
     },
     "unavailable": {
         "title": "Korty niedostępne",
@@ -143,6 +152,56 @@ STATUS_VIEW_META = {
         "empty_message": "Brak kortów bez danych do wyświetlenia.",
     },
 }
+
+BOOL_TRUE_VALUES = {"1", "true", "t", "yes", "y", "on"}
+BOOL_FALSE_VALUES = {"0", "false", "f", "no", "n", "off"}
+
+
+def coerce_bool(value, *, default=None):
+    if value is None:
+        if default is not None:
+            return bool(default)
+        raise ValueError("Brak wartości logicznej")
+
+    if isinstance(value, bool):
+        return value
+
+    if isinstance(value, (int, float)):
+        try:
+            return bool(int(value))
+        except (TypeError, ValueError):  # pragma: no cover - defensive
+            raise ValueError(f"Nie można zinterpretować {value!r} jako bool") from None
+
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in BOOL_TRUE_VALUES:
+            return True
+        if normalized in BOOL_FALSE_VALUES:
+            return False
+        raise ValueError(f"Nie można zinterpretować {value!r} jako bool")
+
+    raise ValueError(f"Nie można zinterpretować {value!r} jako bool")
+
+
+def ensure_overlay_links_schema():
+    with db.engine.begin() as connection:
+        inspector = inspect(connection)
+        if "overlay_links" not in inspector.get_table_names():
+            return
+
+        existing_columns = {column["name"] for column in inspector.get_columns("overlay_links")}
+
+        if "enabled" not in existing_columns:
+            connection.execute(
+                text("ALTER TABLE overlay_links ADD COLUMN enabled BOOLEAN NOT NULL DEFAULT 1")
+            )
+
+        if "hidden" not in existing_columns:
+            connection.execute(
+                text("ALTER TABLE overlay_links ADD COLUMN hidden BOOLEAN NOT NULL DEFAULT 0")
+            )
+
+
 
 DEFAULT_BASE_CONFIG = {
     "view_width": 690,
@@ -251,6 +310,18 @@ class OverlayLink(db.Model):
     kort_id = db.Column(db.String(128), unique=True, nullable=False)
     overlay_url = db.Column(db.String(1024), nullable=False)
     control_url = db.Column(db.String(1024), nullable=False)
+    enabled = db.Column(
+        db.Boolean,
+        nullable=False,
+        server_default=expression.true(),
+        default=True,
+    )
+    hidden = db.Column(
+        db.Boolean,
+        nullable=False,
+        server_default=expression.false(),
+        default=False,
+    )
 
     def to_dict(self):
         return {
@@ -258,6 +329,8 @@ class OverlayLink(db.Model):
             "kort_id": self.kort_id,
             "overlay": self.overlay_url,
             "control": self.control_url,
+            "enabled": bool(self.enabled),
+            "hidden": bool(self.hidden),
         }
 
 
@@ -327,6 +400,7 @@ def overlay_link_sort_key(link):
 
 def ensure_overlay_links_seeded():
     db.create_all()
+    ensure_overlay_links_schema()
     if OverlayLink.query.first() is not None:
         return
 
@@ -342,6 +416,23 @@ def ensure_overlay_links_seeded():
     for kort_id, payload in data.items():
         overlay_url = (payload or {}).get("overlay")
         control_url = (payload or {}).get("control")
+        try:
+            enabled = coerce_bool((payload or {}).get("enabled"), default=True)
+        except ValueError:
+            logger.warning(
+                "Pominięto link dla kortu %s - pole enabled musi być wartością logiczną.",
+                kort_id,
+            )
+            continue
+
+        try:
+            hidden = coerce_bool((payload or {}).get("hidden"), default=False)
+        except ValueError:
+            logger.warning(
+                "Pominięto link dla kortu %s - pole hidden musi być wartością logiczną.",
+                kort_id,
+            )
+            continue
         overlay_valid, overlay_error = validate_overlay_url(overlay_url)
         control_valid, control_error = validate_control_url(control_url)
         if overlay_error or control_error:
@@ -356,6 +447,8 @@ def ensure_overlay_links_seeded():
             kort_id=str(kort_id),
             overlay_url=overlay_valid,
             control_url=control_valid,
+            enabled=enabled,
+            hidden=hidden,
         )
         db.session.add(link)
         created = True
@@ -374,7 +467,12 @@ def get_overlay_links():
 
 def overlay_links_by_kort_id():
     return {
-        link.kort_id: {"overlay": link.overlay_url, "control": link.control_url}
+        link.kort_id: {
+            "overlay": link.overlay_url,
+            "control": link.control_url,
+            "enabled": bool(link.enabled) if link.enabled is not None else True,
+            "hidden": bool(link.hidden) if link.hidden is not None else False,
+        }
         for link in get_overlay_links()
     }
 
@@ -641,8 +739,22 @@ def load_snapshots():
 def normalize_snapshot_entry(kort_id, snapshot, link_meta=None):
     snapshot = snapshot or {}
     has_snapshot = bool(snapshot)
+    link_meta = link_meta or {}
+    try:
+        link_enabled = coerce_bool(link_meta.get("enabled"), default=True)
+    except ValueError:
+        link_enabled = True
+    try:
+        link_hidden = coerce_bool(link_meta.get("hidden"), default=False)
+    except ValueError:
+        link_hidden = False
+
     available = snapshot.get("available", True) if has_snapshot else False
     status = normalize_status(snapshot.get("status"), available, has_snapshot)
+    if not link_enabled:
+        available = False
+        status = "disabled"
+
     status_label = STATUS_LABELS.get(status, status.replace("_", " ").capitalize())
 
     overlay_is_on = bool(available)
@@ -658,7 +770,7 @@ def normalize_snapshot_entry(kort_id, snapshot, link_meta=None):
         or snapshot.get("kort_name")
         or snapshot.get("kort")
         or snapshot.get("court")
-        or (link_meta or {}).get("name")
+        or link_meta.get("name")
         or (f"Kort {kort_id}" if kort_id else "Kort")
     )
 
@@ -716,6 +828,8 @@ def normalize_snapshot_entry(kort_id, snapshot, link_meta=None):
         "status": status,
         "status_label": status_label,
         "available": available,
+        "enabled": link_enabled,
+        "hidden": link_hidden,
         "has_snapshot": has_snapshot,
         "overlay_is_on": overlay_is_on,
         "overlay_label": overlay_label,
@@ -757,6 +871,16 @@ def validate_overlay_link_data(data):
     else:
         normalized["control_url"] = control_valid
 
+    try:
+        normalized["enabled"] = coerce_bool((data or {}).get("enabled"), default=True)
+    except ValueError:
+        errors["enabled"] = "Pole enabled musi być wartością logiczną (true/false)."
+
+    try:
+        normalized["hidden"] = coerce_bool((data or {}).get("hidden"), default=False)
+    except ValueError:
+        errors["hidden"] = "Pole hidden musi być wartością logiczną (true/false)."
+
     return normalized, errors
 
 
@@ -788,6 +912,7 @@ def overlay_links_api():
 @requires_config_auth
 def overlay_links_reload():
     db.create_all()
+    ensure_overlay_links_schema()
 
     if not os.path.exists(LINKS_PATH):
         return jsonify({"error": f"Brak pliku {LINKS_PATH}."}), 404
@@ -815,6 +940,24 @@ def overlay_links_reload():
         kort_id_str = str(kort_id)
         seen_ids.add(kort_id_str)
         payload = payload or {}
+        try:
+            enabled = coerce_bool(payload.get("enabled"), default=True)
+        except ValueError:
+            logger.warning(
+                "Pominięto link dla kortu %s - pole enabled musi być wartością logiczną.",
+                kort_id_str,
+            )
+            continue
+
+        try:
+            hidden = coerce_bool(payload.get("hidden"), default=False)
+        except ValueError:
+            logger.warning(
+                "Pominięto link dla kortu %s - pole hidden musi być wartością logiczną.",
+                kort_id_str,
+            )
+            continue
+
         overlay_valid, overlay_error = validate_overlay_url(payload.get("overlay"))
         control_valid, control_error = validate_control_url(payload.get("control"))
 
@@ -829,9 +972,20 @@ def overlay_links_reload():
 
         existing = existing_links.get(kort_id_str)
         if existing is not None:
-            if existing.overlay_url != overlay_valid or existing.control_url != control_valid:
+            changed = False
+            if existing.overlay_url != overlay_valid:
                 existing.overlay_url = overlay_valid
+                changed = True
+            if existing.control_url != control_valid:
                 existing.control_url = control_valid
+                changed = True
+            if bool(existing.enabled) != bool(enabled):
+                existing.enabled = enabled
+                changed = True
+            if bool(existing.hidden) != bool(hidden):
+                existing.hidden = hidden
+                changed = True
+            if changed:
                 updated += 1
         else:
             db.session.add(
@@ -839,6 +993,8 @@ def overlay_links_reload():
                     kort_id=kort_id_str,
                     overlay_url=overlay_valid,
                     control_url=control_valid,
+                    enabled=enabled,
+                    hidden=hidden,
                 )
             )
             created += 1
@@ -885,6 +1041,8 @@ def overlay_link_detail_api(link_id):
     link.kort_id = payload["kort_id"]
     link.overlay_url = payload["overlay_url"]
     link.control_url = payload["control_url"]
+    link.enabled = payload["enabled"]
+    link.hidden = payload["hidden"]
     db.session.commit()
     return jsonify(link.to_dict())
 
@@ -1089,14 +1247,20 @@ def wyniki():
     snapshots = load_snapshots()
     links = overlay_links_by_kort_id()
 
-    known_ids = {str(kort_id) for kort_id in links.keys()}
-    known_ids.update(str(kort_id) for kort_id in snapshots.keys())
+    hidden_ids = {str(kort_id) for kort_id, meta in links.items() if (meta or {}).get("hidden")}
+    known_ids = {str(kort_id) for kort_id in links.keys() if str(kort_id) not in hidden_ids}
+    known_ids.update(
+        str(kort_id)
+        for kort_id in snapshots.keys()
+        if str(kort_id) not in hidden_ids
+    )
     sorted_ids = sorted(known_ids, key=kort_id_sort_key)
 
     matches_by_status = {status: [] for status in STATUS_ORDER}
 
     for kort_id in sorted_ids:
-        normalized = normalize_snapshot_entry(kort_id, snapshots.get(kort_id), links.get(kort_id))
+        link_meta = links.get(kort_id)
+        normalized = normalize_snapshot_entry(kort_id, snapshots.get(kort_id), link_meta)
         matches_by_status.setdefault(normalized["status"], []).append(normalized)
 
     for status_matches in matches_by_status.values():
@@ -1156,6 +1320,8 @@ def overlay_kort(kort_id):
     mini = []
     for mini_id, data in links_by_id.items():
         if mini_id == kort_id:
+            continue
+        if (data or {}).get("hidden"):
             continue
         normalized = normalize_snapshot_entry(
             mini_id,
@@ -1285,7 +1451,7 @@ def overlay_all():
     overlay_config = load_config()
 
     overlays = []
-    sorted_overlays = [link.to_dict() for link in get_overlay_links()]
+    sorted_overlays = [link.to_dict() for link in get_overlay_links() if not link.hidden]
     snapshots = load_snapshots()
 
     for link, corner_key in zip(sorted_overlays, CORNERS):
