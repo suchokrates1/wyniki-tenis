@@ -275,11 +275,11 @@
                     {% if match.pause_active %}
                     <span class="pause-indicator">{{ match.pause_label }}</span>
                     {% endif %}
-                    {% if match.last_updated %}
-                    <time class="last-updated" datetime="{{ match.last_updated }}">Ostatnia aktualizacja: {{ match.last_updated }}</time>
-                    {% else %}
-                    <span class="last-updated">Ostatnia aktualizacja: brak danych</span>
-                    {% endif %}
+                      {% if match.last_updated %}
+                      <time class="last-updated"{% if match.last_updated_iso %} datetime="{{ match.last_updated_iso }}" title="{{ match.last_updated_iso }}"{% endif %}>Ostatnia aktualizacja: {{ match.last_updated }}</time>
+                      {% else %}
+                      <span class="last-updated">Ostatnia aktualizacja: brak danych</span>
+                      {% endif %}
                     <span>Status: {{ match.status_label }}</span>
                     <span>Sety ogółem: {{ match.set_summary }}</span>
                     <span>Stan punktów: {{ match.score_summary }}</span>

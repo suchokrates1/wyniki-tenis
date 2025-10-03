@@ -48,6 +48,35 @@ def test_overlay_all_and_non_numeric_kort(client):
     assert non_numeric_response.status_code == 404
 
 
+def test_wyniki_view_localizes_last_updated(client, tmp_path, monkeypatch):
+    snapshot_dir = tmp_path / "snapshots"
+    snapshot_dir.mkdir()
+
+    snapshot_payload = {
+        "snapshots": [
+            {
+                "kort_id": "1",
+                "status": "ok",
+                "available": True,
+                "players": [],
+                "last_updated": "2024-07-01T14:32:00+00:00",
+            }
+        ]
+    }
+    (snapshot_dir / "sample.json").write_text(json.dumps(snapshot_payload))
+
+    monkeypatch.setitem(main.app.config, "SNAPSHOTS_DIR", snapshot_dir)
+    monkeypatch.setattr(main, "overlay_links_by_kort_id", lambda: {})
+
+    response = client.get("/wyniki")
+    assert response.status_code == 200
+    html = response.get_data(as_text=True)
+
+    assert "Ostatnia aktualizacja: 16:32 CEST" in html
+    assert 'datetime="2024-07-01T14:32:00Z"' in html
+    assert 'title="2024-07-01T14:32:00Z"' in html
+
+
 def test_config_page_renders(client, auth_headers):
     response = client.get("/config", headers=auth_headers)
     assert response.status_code == 200

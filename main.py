@@ -10,6 +10,8 @@ from functools import wraps
 from pathlib import Path
 from urllib.parse import urlparse
 
+from zoneinfo import ZoneInfo
+
 from flask import Flask, flash, jsonify, render_template, request, url_for
 from flask_cors import CORS
 from flask_sqlalchemy import SQLAlchemy
@@ -247,6 +249,7 @@ class OverlayLink(db.Model):
 
 
 APP_OVERLAYS_HOST = "app.overlays.uno"
+WARSAW_TIMEZONE = ZoneInfo("Europe/Warsaw")
 
 
 def _path_has_identifier(path: str, prefix: str) -> bool:
@@ -520,7 +523,9 @@ def normalize_players(players_data, serving_marker):
 
 def normalize_last_updated(value):
     if value is None:
-        return None
+        return None, None
+
+    moment = None
 
     if isinstance(value, datetime):
         moment = value
@@ -529,21 +534,30 @@ def normalize_last_updated(value):
     elif isinstance(value, str):
         text = value.strip()
         if not text:
-            return None
+            return None, None
         try:
             moment = datetime.fromisoformat(text)
         except ValueError:
             try:
                 moment = parsedate_to_datetime(text)
             except (TypeError, ValueError):
-                return text
+                return text, None
     else:
-        return str(value)
+        text = str(value).strip()
+        if not text:
+            return None, None
+        return text, None
 
     if moment.tzinfo is None:
         moment = moment.replace(tzinfo=timezone.utc)
 
-    return moment.astimezone(timezone.utc).isoformat()
+    moment_utc = moment.astimezone(timezone.utc)
+    moment_warsaw = moment.astimezone(WARSAW_TIMEZONE)
+
+    display_value = moment_warsaw.strftime("%H:%M %Z")
+    utc_iso = moment_utc.isoformat().replace("+00:00", "Z")
+
+    return display_value, utc_iso
 
 
 def load_snapshots():
@@ -586,7 +600,7 @@ def normalize_snapshot_entry(kort_id, snapshot, link_meta=None):
 
     overlay_is_on = bool(available)
     overlay_label = "ON" if overlay_is_on else "OFF"
-    last_updated = normalize_last_updated(
+    last_updated_display, last_updated_iso = normalize_last_updated(
         snapshot.get("last_updated")
         or snapshot.get("updated_at")
         or snapshot.get("timestamp")
@@ -658,7 +672,8 @@ def normalize_snapshot_entry(kort_id, snapshot, link_meta=None):
         "has_snapshot": has_snapshot,
         "overlay_is_on": overlay_is_on,
         "overlay_label": overlay_label,
-        "last_updated": last_updated,
+        "last_updated": last_updated_display,
+        "last_updated_iso": last_updated_iso,
         "players": players,
         "row_span": row_span,
         "score_summary": score_summary,
@@ -1109,6 +1124,7 @@ def overlay_kort(kort_id):
                 "overlay_is_on": normalized["overlay_is_on"],
                 "overlay_label": normalized["overlay_label"],
                 "last_updated": normalized["last_updated"],
+                "last_updated_iso": normalized["last_updated_iso"],
                 "pause_active": normalized["pause_active"],
                 "pause_label": normalized["pause_label"],
                 "pause_minutes": normalized["pause_minutes"],
@@ -1153,6 +1169,7 @@ def overlay_all():
                 "overlay_is_on": normalized["overlay_is_on"],
                 "overlay_label": normalized["overlay_label"],
                 "last_updated": normalized["last_updated"],
+                "last_updated_iso": normalized["last_updated_iso"],
                 "pause_active": normalized["pause_active"],
                 "pause_label": normalized["pause_label"],
                 "pause_minutes": normalized["pause_minutes"],
