@@ -1,6 +1,12 @@
 import copy
 import json
 import logging
+import os
+import shutil
+import subprocess
+import sys
+import textwrap
+from pathlib import Path
 
 import pytest
 import requests
@@ -1211,4 +1217,45 @@ def test_normalize_snapshot_entry_marks_disabled_status():
     assert normalized["overlay_is_on"] is False
     assert normalized["enabled"] is False
     assert normalized["hidden"] is True
+
+
+def test_sqlite_directory_is_created_for_custom_database_url(tmp_path):
+    env = os.environ.copy()
+    env["DATABASE_URL"] = "sqlite:///tmp/test/overlay.db"
+
+    project_root = Path(__file__).resolve().parents[1]
+    existing_pythonpath = env.get("PYTHONPATH")
+    if existing_pythonpath:
+        env["PYTHONPATH"] = f"{project_root}{os.pathsep}{existing_pythonpath}"
+    else:
+        env["PYTHONPATH"] = str(project_root)
+
+    script = textwrap.dedent(
+        """
+        from main import app, db
+
+        with app.app_context():
+            db.create_all()
+        """
+    )
+
+    result = subprocess.run(
+        [sys.executable, "-c", script],
+        cwd=tmp_path,
+        env=env,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    target_dir = project_root / "instance" / "tmp" / "test"
+    try:
+        assert target_dir.is_dir(), result.stderr
+        assert (target_dir / "overlay.db").exists(), result.stderr
+    finally:
+        if target_dir.exists():
+            shutil.rmtree(target_dir)
+        tmp_root = target_dir.parent
+        if tmp_root.exists() and not any(tmp_root.iterdir()):
+            tmp_root.rmdir()
 
