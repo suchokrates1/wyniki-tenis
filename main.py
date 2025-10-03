@@ -1242,8 +1242,7 @@ def index():
     )
 
 
-@app.route("/wyniki")
-def wyniki():
+def build_wyniki_context():
     snapshots = load_snapshots()
     links = overlay_links_by_kort_id()
 
@@ -1286,12 +1285,48 @@ def wyniki():
             }
         )
 
-    return render_template(
-        "wyniki.html",
-        sections=sections,
-        has_running_matches=has_running_matches,
-        has_non_running_snapshots=has_non_running_snapshots,
+    return {
+        "sections": sections,
+        "has_running_matches": has_running_matches,
+        "has_non_running_snapshots": has_non_running_snapshots,
+        "generated_at": datetime.now(timezone.utc).replace(tzinfo=timezone.utc).isoformat().replace("+00:00", "Z"),
+    }
+
+
+@app.route("/wyniki")
+def wyniki():
+    context = build_wyniki_context()
+    context.update(
+        {
+            "fragment_url": url_for("wyniki_fragment"),
+            "live_api_url": url_for("wyniki_live_api"),
+        }
     )
+    return render_template("wyniki.html", **context)
+
+
+@app.route("/wyniki/fragment")
+def wyniki_fragment():
+    context = build_wyniki_context()
+    context.update(
+        {
+            "fragment_url": url_for("wyniki_fragment"),
+            "live_api_url": url_for("wyniki_live_api"),
+        }
+    )
+    return render_template("partials/wyniki_sections.html", **context)
+
+
+@app.route("/api/wyniki/live")
+def wyniki_live_api():
+    context = build_wyniki_context()
+    context.update(
+        {
+            "fragment_url": url_for("wyniki_fragment"),
+            "live_api_url": url_for("wyniki_live_api"),
+        }
+    )
+    return jsonify(context)
 
 
 @app.route("/kort/<int:kort_id>")

@@ -1,0 +1,82 @@
+<div id="wyniki-sections"
+     class="wyniki-sections"
+     hx-get="{{ fragment_url }}"
+     hx-trigger="load, every 8s"
+     hx-swap="outerHTML"
+     data-generated-at="{{ generated_at }}"
+     data-live-api="{{ live_api_url }}">
+  {% for section in sections %}
+  <section aria-labelledby="section-{{ section.status }}">
+    <h2 id="section-{{ section.status }}">{{ section.title }}</h2>
+    {% if section.status == 'active' and not has_running_matches and has_non_running_snapshots %}
+    <p class="notice">Brak potwierdzonych aktywnych spotkań – prezentujemy ostatnio dostępne korty wraz z informacją o braku danych.</p>
+    {% elif not section.matches %}
+    <p class="notice">{{ section.empty_message }}</p>
+    {% endif %}
+    <div class="table-wrapper">
+      <table>
+        <caption>{{ section.caption }}</caption>
+        <thead>
+          <tr>
+            <th scope="col">Kort</th>
+            <th scope="col">Zawodnik</th>
+            <th scope="col">Sety</th>
+            <th scope="col">Gemy/Punkty</th>
+            <th scope="col">Status</th>
+            <th scope="col">Podsumowanie</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% if section.matches %}
+          {% for match in section.matches %}
+          {% for player in match.players %}
+          <tr>
+            {% if loop.first %}
+            <th scope="rowgroup" rowspan="{{ match.row_span }}">{{ match.kort_label }}</th>
+            {% endif %}
+            <th scope="row">
+              {% if player.is_serving %}<span class="serving-indicator" aria-label="Serwuje">▶</span>{% endif %}
+              {{ player.display_name }}
+            </th>
+            <td>{{ player.display_sets }}</td>
+            <td>{{ player.display_games }}</td>
+            {% if loop.first %}
+            <td rowspan="{{ match.row_span }}" class="status-{{ match.status }}">{{ match.status_label }}</td>
+            <td rowspan="{{ match.row_span }}">
+              <div class="summary">
+                {% if match.badges %}
+                <div class="status-badges">
+                  {% for badge in match.badges %}
+                  <span class="status-badge status-badge-{{ badge.key | default('generic') }}"{% if badge.description %} title="{{ badge.description }}"{% endif %}>{{ badge.label }}</span>
+                  {% endfor %}
+                </div>
+                {% endif %}
+                <span class="overlay-pill overlay-{{ 'on' if match.overlay_is_on else 'off' }}">Overlay: {{ match.overlay_label }}</span>
+                {% if match.pause_active %}
+                <span class="pause-indicator">{{ match.pause_label }}</span>
+                {% endif %}
+                {% if match.last_updated %}
+                <time class="last-updated"{% if match.last_updated_iso %} datetime="{{ match.last_updated_iso }}" title="{{ match.last_updated_iso }}"{% endif %}>Ostatnia aktualizacja: {{ match.last_updated }}</time>
+                {% else %}
+                <span class="last-updated">Ostatnia aktualizacja: brak danych</span>
+                {% endif %}
+                <span>Status: {{ match.status_label }}</span>
+                <span>Sety ogółem: {{ match.set_summary }}</span>
+                <span>Stan punktów: {{ match.score_summary }}</span>
+              </div>
+            </td>
+            {% endif %}
+          </tr>
+          {% endfor %}
+          {% endfor %}
+          {% else %}
+          <tr>
+            <td class="empty-state" colspan="6">{{ section.empty_message }}</td>
+          </tr>
+          {% endif %}
+        </tbody>
+      </table>
+    </div>
+  </section>
+  {% endfor %}
+</div>

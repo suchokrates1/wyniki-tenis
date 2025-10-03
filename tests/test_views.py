@@ -100,6 +100,64 @@ def test_wyniki_hides_hidden_and_marks_disabled(client):
     assert "Kort 2" not in html
 
 
+def test_wyniki_fragment_and_api_refresh(client, monkeypatch):
+    state = {"version": 0}
+
+    def fake_overlay_links_by_kort_id():
+        return {
+            "1": {
+                "overlay": "https://app.overlays.uno/output/1",
+                "control": "https://app.overlays.uno/control/1",
+                "enabled": True,
+                "hidden": False,
+            }
+        }
+
+    def make_snapshot(name, status="active"):
+        return {
+            "kort_id": "1",
+            "status": status,
+            "available": True,
+            "players": [
+                {"name": name, "sets": 1, "games": 3},
+                {"name": "Opponent", "sets": 0, "games": 2},
+            ],
+            "last_updated": "2024-07-01T14:32:00+00:00",
+        }
+
+    def fake_load_snapshots():
+        if state["version"] == 0:
+            return {"1": make_snapshot("Anna A", status="active")}
+        return {"1": make_snapshot("Anna B", status="finished")}
+
+    monkeypatch.setattr(main, "overlay_links_by_kort_id", fake_overlay_links_by_kort_id)
+    monkeypatch.setattr(main, "load_snapshots", fake_load_snapshots)
+
+    initial = client.get("/wyniki/fragment")
+    assert initial.status_code == 200
+    initial_html = initial.get_data(as_text=True)
+    assert "Anna A" in initial_html
+    assert "hx-get=\"/wyniki/fragment\"" in initial_html
+
+    state["version"] = 1
+
+    updated = client.get("/wyniki/fragment")
+    assert updated.status_code == 200
+    updated_html = updated.get_data(as_text=True)
+    assert "Anna B" in updated_html
+    assert "Anna A" not in updated_html
+
+    live = client.get("/api/wyniki/live")
+    assert live.status_code == 200
+    payload = live.get_json()
+    assert payload["generated_at"].endswith("Z")
+
+    finished_section = next(section for section in payload["sections"] if section["status"] == "finished")
+    assert finished_section["matches"], "Finished section should include refreshed match"
+    top_match = finished_section["matches"][0]
+    assert top_match["players"][0]["display_name"] == "Anna B"
+
+
 def test_config_page_renders(client, auth_headers):
     response = client.get("/config", headers=auth_headers)
     assert response.status_code == 200
