@@ -133,6 +133,21 @@
       gap: 0.25rem;
     }
 
+    .pause-indicator {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.35rem;
+      font-size: 0.9rem;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      font-weight: 700;
+      padding: 0.25rem 0.7rem;
+      border-radius: 999px;
+      background: rgba(248, 113, 113, 0.2);
+      border: 1px solid rgba(248, 113, 113, 0.45);
+      color: #fecaca;
+    }
+
     .overlay-pill {
       display: inline-flex;
       align-items: center;
@@ -223,6 +238,9 @@
                 <td rowspan="{{ match.row_span }}">
                   <div class="summary">
                     <span class="overlay-pill overlay-{{ 'on' if match.overlay_is_on else 'off' }}">Overlay: {{ match.overlay_label }}</span>
+                    {% if match.pause_active %}
+                    <span class="pause-indicator">{{ match.pause_label }}</span>
+                    {% endif %}
                     {% if match.last_updated %}
                     <time class="last-updated" datetime="{{ match.last_updated }}">Ostatnia aktualizacja: {{ match.last_updated }}</time>
                     {% else %}

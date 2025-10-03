@@ -593,6 +593,20 @@ def normalize_snapshot_entry(kort_id, snapshot, link_meta=None):
 
     set_summary = display_value(snapshot.get("set_score") or snapshot.get("sets"))
 
+    pause_minutes = snapshot.get("pause_minutes")
+    try:
+        pause_minutes_value = int(pause_minutes) if pause_minutes is not None else None
+    except (TypeError, ValueError):
+        pause_minutes_value = None
+    pause_active = bool(snapshot.get("pause_active"))
+    pause_until = snapshot.get("pause_until")
+    pause_label = None
+    if pause_active:
+        if pause_minutes_value is not None:
+            pause_label = f"Pauza ({pause_minutes_value} min)"
+        else:
+            pause_label = "Pauza"
+
     return {
         "kort_id": str(kort_id),
         "kort_label": display_name(kort_label, fallback=f"Kort {kort_id}" if kort_id else "Kort"),
@@ -607,6 +621,10 @@ def normalize_snapshot_entry(kort_id, snapshot, link_meta=None):
         "row_span": row_span,
         "score_summary": score_summary,
         "set_summary": set_summary,
+        "pause_active": pause_active,
+        "pause_minutes": pause_minutes_value,
+        "pause_label": pause_label,
+        "pause_until": pause_until,
     }
 
 
@@ -1048,6 +1066,9 @@ def overlay_kort(kort_id):
                 "overlay_is_on": normalized["overlay_is_on"],
                 "overlay_label": normalized["overlay_label"],
                 "last_updated": normalized["last_updated"],
+                "pause_active": normalized["pause_active"],
+                "pause_label": normalized["pause_label"],
+                "pause_minutes": normalized["pause_minutes"],
             }
         )
 
@@ -1089,6 +1110,9 @@ def overlay_all():
                 "overlay_is_on": normalized["overlay_is_on"],
                 "overlay_label": normalized["overlay_label"],
                 "last_updated": normalized["last_updated"],
+                "pause_active": normalized["pause_active"],
+                "pause_label": normalized["pause_label"],
+                "pause_minutes": normalized["pause_minutes"],
             }
         )
 

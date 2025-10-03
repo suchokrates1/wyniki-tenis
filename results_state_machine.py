@@ -191,6 +191,9 @@ class CourtState:
     last_score_snapshot: Optional[ScoreSnapshot] = None
     points_positive_streak: int = 0
     points_absent_streak: int = 0
+    command_error_streak: int = 0
+    command_error_streak_by_spec: Dict[str, int] = field(default_factory=dict)
+    paused_until: Optional[float] = None
 
     # --- pola z gałęzi "main" (rotacja A/B itp.)
     tick_counter: int = 0
@@ -386,6 +389,16 @@ class CourtState:
         if schedule is None:
             return None
         return schedule.last_run
+
+    def is_paused(self, now: float) -> bool:
+        if self.paused_until is None:
+            return False
+        return self.paused_until > now
+
+    def clear_pause(self) -> None:
+        self.paused_until = None
+        self.command_error_streak = 0
+        self.command_error_streak_by_spec.clear()
 
 
 __all__ = [

@@ -91,6 +91,21 @@
       font-size: 0.85rem;
     }
 
+    .pause-indicator {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.35rem;
+      font-size: 0.85rem;
+      font-weight: 700;
+      letter-spacing: 0.05em;
+      text-transform: uppercase;
+      padding: 0.25rem 0.6rem;
+      border-radius: 999px;
+      background: rgba(248, 113, 113, 0.18);
+      border: 1px solid rgba(248, 113, 113, 0.4);
+      color: #fecaca;
+    }
+
     .mini-meta {
       margin-top: 4px;
       display: flex;
@@ -114,6 +129,9 @@
   <div class="status-panel" aria-live="polite">
     <span class="status-pill status-{{ 'on' if snapshot.overlay_is_on else 'off' }}">Overlay: {{ snapshot.overlay_label | default('OFF') }}</span>
     <span class="status-info">Status: {{ snapshot.status_label | default('Brak danych') }}</span>
+    {% if snapshot.pause_active %}
+    <span class="pause-indicator">{{ snapshot.pause_label }}</span>
+    {% endif %}
     {% if snapshot.last_updated %}
     <time class="status-info" datetime="{{ snapshot.last_updated }}">Ostatnia aktualizacja: {{ snapshot.last_updated }}</time>
     {% else %}
@@ -194,6 +212,9 @@
             <div class="mini-meta">
               <span class="status-pill status-{{ 'on' if mini.overlay_is_on else 'off' }}" style="font-size: 0.75rem; padding: 0.15rem 0.55rem;">Overlay: {{ mini.overlay_label }}</span>
               <span>Status: {{ mini.status_label }}</span>
+              {% if mini.pause_active %}
+              <span class="pause-indicator" style="font-size: 0.7rem; padding: 0.2rem 0.5rem;">{{ mini.pause_label }}</span>
+              {% endif %}
               {% if mini.last_updated %}
               <time datetime="{{ mini.last_updated }}">Ostatnia aktualizacja: {{ mini.last_updated }}</time>
               {% else %}

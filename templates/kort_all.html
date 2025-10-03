@@ -89,6 +89,21 @@
       color: #fca5a5;
       border-color: rgba(239, 68, 68, 0.45);
     }
+
+    .pause-indicator {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.35rem;
+      font-size: 0.8rem;
+      font-weight: 700;
+      letter-spacing: 0.05em;
+      text-transform: uppercase;
+      padding: 0.25rem 0.6rem;
+      border-radius: 999px;
+      background: rgba(248, 113, 113, 0.2);
+      border: 1px solid rgba(248, 113, 113, 0.4);
+      color: #fecaca;
+    }
   </style>
 </head>
 <body>
@@ -107,6 +122,9 @@
         <div class="kort-meta" aria-live="polite">
           <span class="status-pill status-{{ 'on' if kort.overlay_is_on else 'off' }}">Overlay: {{ kort.overlay_label }}</span>
           <span>Status: {{ kort.status_label }}</span>
+          {% if kort.pause_active %}
+          <span class="pause-indicator">{{ kort.pause_label }}</span>
+          {% endif %}
           {% if kort.last_updated %}
           <time datetime="{{ kort.last_updated }}">Ostatnia aktualizacja: {{ kort.last_updated }}</time>
           {% else %}
