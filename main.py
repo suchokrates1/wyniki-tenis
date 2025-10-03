@@ -607,6 +607,29 @@ def normalize_snapshot_entry(kort_id, snapshot, link_meta=None):
         else:
             pause_label = "Pauza"
 
+    badges_raw = snapshot.get("badges") or []
+    normalized_badges: list[dict[str, str]] = []
+    if isinstance(badges_raw, (list, tuple)):
+        for badge in badges_raw:
+            if isinstance(badge, dict):
+                label = display_value(badge.get("label"), fallback=None)
+                if not label:
+                    continue
+                normalized_badge = {"label": label}
+                key = badge.get("key")
+                if key is not None:
+                    normalized_badge["key"] = str(key)
+                else:
+                    normalized_badge["key"] = "custom"
+                description = display_value(badge.get("description"), fallback=None)
+                if description:
+                    normalized_badge["description"] = description
+                normalized_badges.append(normalized_badge)
+            else:
+                label = display_value(badge, fallback=None)
+                if label:
+                    normalized_badges.append({"label": label, "key": "custom"})
+
     return {
         "kort_id": str(kort_id),
         "kort_label": display_name(kort_label, fallback=f"Kort {kort_id}" if kort_id else "Kort"),
@@ -625,6 +648,7 @@ def normalize_snapshot_entry(kort_id, snapshot, link_meta=None):
         "pause_minutes": pause_minutes_value,
         "pause_label": pause_label,
         "pause_until": pause_until,
+        "badges": normalized_badges,
     }
 
 

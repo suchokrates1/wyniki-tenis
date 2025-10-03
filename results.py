@@ -44,6 +44,7 @@ RETRY_JITTER_MAX_SECONDS = 0.3
 COMMAND_ERROR_PAUSE_THRESHOLD = 3
 COMMAND_ERROR_PAUSE_MINUTES = 5
 UNAVAILABLE_SLOW_POLL_SECONDS = 60.0
+NOT_FOUND_COOLDOWN_SECONDS = 10 * 60.0
 
 FULL_SNAPSHOT_COMMAND = None
 
@@ -51,6 +52,13 @@ ARCHIVE_LIMIT = 50
 
 
 CommandPlanEntry = Dict[str, Any]
+
+
+NOT_FOUND_BADGE = {
+    "key": "not_found",
+    "label": "404",
+    "description": "Kort nie został znaleziony (HTTP 404)",
+}
 
 
 _PLAYER_FIELD_PATTERN = re.compile(
@@ -414,6 +422,7 @@ def ensure_snapshot_entry(kort_id: str) -> Dict[str, Any]:
                 "pause_active": False,
                 "pause_minutes": COMMAND_ERROR_PAUSE_MINUTES,
                 "pause_until": None,
+                "badges": [],
             },
         )
     return entry
@@ -715,6 +724,7 @@ def _merge_partial_payload(kort_id: str, partial: Dict[str, Any]) -> Dict[str, A
         entry["pause_minutes"] = entry.get("pause_minutes") or COMMAND_ERROR_PAUSE_MINUTES
         entry["pause_active"] = False
         entry["pause_until"] = None
+        entry["badges"] = []
 
         try:
             parsed = parse_overlay_json(raw)
@@ -844,6 +854,7 @@ def _handle_command_error(
     state: Optional[CourtState] = None,
     now: Optional[float] = None,
     spec_name: Optional[str] = None,
+    badges: Optional[List[Dict[str, Any]]] = None,
 ) -> Dict[str, Any]:
     if now is None:
         now = time.time()
@@ -891,6 +902,7 @@ def _handle_command_error(
         entry["pause_minutes"] = entry.get("pause_minutes") or COMMAND_ERROR_PAUSE_MINUTES
         entry["pause_active"] = is_paused
         entry["pause_until"] = pause_until_iso
+        entry["badges"] = copy.deepcopy(badges or [])
         snapshot = copy.deepcopy(entry)
     return snapshot
 
@@ -1225,6 +1237,36 @@ def _update_once(
             if response is not None:
                 status_code = response.status_code
 
+                if status_code == 404:
+                    diagnostics = _format_http_error_details(command, response)
+                    cooldown_until = current_time + NOT_FOUND_COOLDOWN_SECONDS
+                    _schedule_controlapp_resume(controlapp_identifier, cooldown_until)
+                    cooldown_seconds = max(0.0, cooldown_until - current_time)
+                    resume_iso = datetime.fromtimestamp(
+                        cooldown_until, timezone.utc
+                    ).isoformat()
+                    logger.warning(
+                        (
+                            "Serwer zwrócił 404 dla kortu %s (%s) - "
+                            "pauza %.0f s (do %s) (%s)%s"
+                        ),
+                        kort_id,
+                        command,
+                        cooldown_seconds,
+                        resume_iso,
+                        diagnostics,
+                        rate_limits_desc,
+                    )
+                    final_snapshot = _handle_command_error(
+                        kort_id,
+                        error=diagnostics,
+                        state=state,
+                        now=current_time,
+                        spec_name=spec_name,
+                        badges=[NOT_FOUND_BADGE],
+                    )
+                    break
+
                 if status_code == 400:
                     diagnostics = _format_http_error_details(command, response)
                     logger.warning(
@@ -1242,7 +1284,7 @@ def _update_once(
                     )
                     break
 
-                if 400 <= status_code < 500 and status_code != 429:
+                if 400 <= status_code < 500 and status_code not in {404, 429}:
                     diagnostics = _format_http_error_details(command, response)
                     logger.warning(
                         "Serwer zwrócił błąd %s dla kortu %s (%s): %s",
