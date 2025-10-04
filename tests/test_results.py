@@ -591,6 +591,24 @@ def test_update_once_cycles_commands_and_transitions(monkeypatch):
 
     current_time = {"value": 0.0}
 
+    original_throttle = results_module._throttle_request
+    current_time_ref = current_time
+
+    def simulated_throttle(
+        controlapp_id: str,
+        *,
+        simulate: bool = False,
+        current_time=None,
+    ) -> None:
+        _ = simulate, current_time
+        return original_throttle(
+            controlapp_id,
+            simulate=True,
+            current_time=current_time_ref["value"],
+        )
+
+    monkeypatch.setattr(results_module, "_throttle_request", simulated_throttle)
+
     def fake_merge(kort_id, partial):
         tick = current_time["value"]
         if tick < 30:
@@ -1020,6 +1038,69 @@ def test_update_once_respects_rate_limit_cooldown(monkeypatch):
     assert snapshot["status"] == SNAPSHOT_STATUS_OK
     assert snapshot["players"]["A"]["points"] == "15"
 
+
+def test_update_once_waits_until_cooldown_expires_before_retry(monkeypatch):
+    snapshots.clear()
+    results_module.court_states.clear()
+
+    overlay_links = {
+        "1": {"control": "https://app.overlays.uno/control/cooldown"}
+    }
+
+    def supplier():
+        return overlay_links
+
+    retry_response = DummyResponse({"error": "too many"}, status_code=429)
+    retry_response.headers["Retry-After"] = "3"
+    retry_response.headers["X-RateLimit-Reset"] = "83"
+    success_payload = {
+        "PlayerA": {"value": "Player One"},
+        "PlayerB": {"value": "Player Two"},
+        "PointsPlayerA": {"value": "15"},
+        "PointsPlayerB": {"value": "30"},
+    }
+    success_response = DummyResponse(success_payload, status_code=200)
+    session = SequenceSession([retry_response, success_response])
+
+    fake_time = TimeController(start=80.0)
+    monkeypatch.setattr(results_module.time, "time", fake_time.time)
+    monkeypatch.setattr(results_module.time, "sleep", fake_time.sleep)
+    monkeypatch.setattr(results_module.random, "uniform", lambda *_: 0.0)
+    monkeypatch.setattr(results_state_machine, "_default_offset", lambda *_: 0.0)
+
+    original_throttle = results_module._throttle_request
+    call_times: list[float] = []
+
+    def simulated_throttle(controlapp_id: str, *, simulate: bool = False, current_time=None):
+        call_times.append(fake_time.time())
+        return original_throttle(
+            controlapp_id,
+            simulate=True,
+            current_time=fake_time.time(),
+        )
+
+    monkeypatch.setattr(results_module, "_throttle_request", simulated_throttle)
+
+    first_tick = fake_time.time()
+    results_module._update_once(app, supplier, session=session, now=first_tick)
+
+    assert len(session.requests) == 1
+    assert call_times == [first_tick]
+
+    cooldown = results_module._next_allowed_request_by_controlapp.get("cooldown")
+    assert cooldown is not None
+
+    fake_time.current = cooldown - 0.5
+    results_module._update_once(app, supplier, session=session, now=fake_time.time())
+
+    assert len(session.requests) == 1
+    assert call_times == [first_tick]
+
+    fake_time.current = cooldown + 0.1
+    results_module._update_once(app, supplier, session=session, now=fake_time.time())
+
+    assert len(session.requests) == 2
+    assert call_times[-1] == pytest.approx(fake_time.current, rel=1e-6)
 
 def test_update_once_switches_polling_when_overlay_unavailable(monkeypatch):
     snapshots.clear()

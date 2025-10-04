@@ -349,8 +349,18 @@ def _sleep(duration: float) -> None:
     time.sleep(duration)
 
 
-def _throttle_request(controlapp_id: str, *, current_time: Optional[float] = None) -> None:
-    simulated_time = current_time
+def _throttle_request(
+    controlapp_id: str,
+    *,
+    simulate: bool = False,
+    current_time: Optional[float] = None,
+) -> None:
+    if simulate:
+        if current_time is None:
+            raise ValueError("current_time is required when simulate=True")
+        simulated_time = current_time
+    else:
+        simulated_time = None
     while True:
         with _throttle_lock:
             now_value = simulated_time if simulated_time is not None else time.time()
@@ -1295,7 +1305,7 @@ def _update_once(
             status_code: Optional[int] = None
             try:
                 try:
-                    _throttle_request(controlapp_identifier, current_time=current_time)
+                    _throttle_request(controlapp_identifier)
                     response = http.put(
                         base_url,
                         json=payload,
