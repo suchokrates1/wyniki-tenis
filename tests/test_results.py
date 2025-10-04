@@ -6,6 +6,7 @@ import shutil
 import subprocess
 import sys
 import textwrap
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
@@ -1270,6 +1271,133 @@ def test_update_once_waits_until_cooldown_expires_before_retry(monkeypatch):
     assert len(session.requests) == 2
     assert call_times[-1] == pytest.approx(fake_time.current, rel=1e-6)
 
+
+def test_update_once_honours_daily_limit_header(monkeypatch):
+    snapshots.clear()
+    results_module.court_states.clear()
+
+    overlay_links = {
+        "1": {"control": "https://app.overlays.uno/control/daily"}
+    }
+
+    def supplier():
+        return overlay_links
+
+    success_payload = {
+        "PlayerA": {"value": "Player One"},
+        "PlayerB": {"value": "Player Two"},
+    }
+
+    first_response = DummyResponse(success_payload, status_code=200)
+    first_response.headers["X-Singular-RateLimit-Daily-Calls"] = (
+        "limit=100; remaining=0; reset=400"
+    )
+    second_response = DummyResponse(success_payload, status_code=200)
+    session = SequenceSession([first_response, second_response])
+
+    fake_time = TimeController(start=100.0)
+    monkeypatch.setattr(results_module.time, "time", fake_time.time)
+    monkeypatch.setattr(results_module.time, "sleep", fake_time.sleep)
+    monkeypatch.setattr(results_state_machine, "_default_offset", lambda *_: 0.0)
+
+    results_module._update_once(app, supplier, session=session, now=fake_time.time())
+
+    assert len(session.requests) == 1
+    cooldown = results_module._next_allowed_request_by_controlapp.get("daily")
+    assert cooldown is not None
+    assert cooldown == pytest.approx(400.0, rel=1e-6)
+
+    fake_time.current = 350.0
+    results_module._update_once(app, supplier, session=session, now=fake_time.time())
+    assert len(session.requests) == 1
+
+    fake_time.current = 401.0
+    results_module._update_once(app, supplier, session=session, now=fake_time.time())
+    assert len(session.requests) == 2
+
+
+def test_update_once_applies_pause_after_consecutive_429(monkeypatch):
+    snapshots.clear()
+    results_module.court_states.clear()
+
+    overlay_links = {
+        "1": {"control": "https://app.overlays.uno/control/rate"}
+    }
+
+    def supplier():
+        return overlay_links
+
+    def build_429_response():
+        resp = DummyResponse({"error": "too many"}, status_code=429)
+        resp.headers["Retry-After"] = "1"
+        return resp
+
+    responses = [build_429_response() for _ in range(3)]
+    session = SequenceSession(responses)
+
+    fake_time = TimeController(start=0.0)
+    monkeypatch.setattr(results_module.time, "time", fake_time.time)
+    monkeypatch.setattr(results_module.time, "sleep", fake_time.sleep)
+    monkeypatch.setattr(results_state_machine, "_default_offset", lambda *_: 0.0)
+
+    # First 429
+    results_module._update_once(app, supplier, session=session, now=fake_time.time())
+    assert len(session.requests) == 1
+
+    # Advance past Retry-After and hit second 429
+    fake_time.current = 2.0
+    results_module._update_once(app, supplier, session=session, now=fake_time.time())
+    assert len(session.requests) == 2
+
+    # Third 429 should trigger pause
+    fake_time.current = 4.0
+    results_module._update_once(app, supplier, session=session, now=fake_time.time())
+    assert len(session.requests) == 3
+
+    state = results_module.court_states["1"]
+    assert state.command_error_streak >= results_module.COMMAND_ERROR_PAUSE_THRESHOLD
+    expected_pause = fake_time.current + (results_module.COMMAND_ERROR_PAUSE_MINUTES * 60)
+    assert state.paused_until == pytest.approx(expected_pause, rel=1e-6)
+
+    snapshot = snapshots["1"]
+    assert snapshot["pause_active"] is True
+    assert snapshot["pause_minutes"] == results_module.COMMAND_ERROR_PAUSE_MINUTES
+    assert snapshot["pause_until"] is not None
+    pause_until_dt = datetime.fromisoformat(snapshot["pause_until"])
+    assert pause_until_dt.tzinfo is not None
+    assert pause_until_dt.timestamp() == pytest.approx(expected_pause, rel=1e-6)
+
+    # Additional tick should be skipped due to pause
+    fake_time.current = expected_pause - 10
+    results_module._update_once(app, supplier, session=session, now=fake_time.time())
+    assert len(session.requests) == 3
+
+
+def test_calculate_retry_delay_without_headers_uses_minimum_backoff(monkeypatch):
+    snapshots.clear()
+    results_module.court_states.clear()
+
+    overlay_links = {
+        "1": {"control": "https://app.overlays.uno/control/retry"}
+    }
+
+    def supplier():
+        return overlay_links
+
+    responses = [DummyResponse({}, status_code=500) for _ in range(4)]
+    session = SequenceSession(responses)
+
+    fake_time = TimeController(start=0.0)
+    monkeypatch.setattr(results_module.time, "time", fake_time.time)
+    monkeypatch.setattr(results_module.time, "sleep", fake_time.sleep)
+    monkeypatch.setattr(results_module.random, "uniform", lambda *_: 0.0)
+    monkeypatch.setattr(results_state_machine, "_default_offset", lambda *_: 0.0)
+
+    results_module._update_once(app, supplier, session=session, now=fake_time.time())
+
+    assert len(fake_time.sleep_calls) == 3
+    assert all(duration >= 5.0 for duration in fake_time.sleep_calls)
+    assert fake_time.sleep_calls == [5.0, 10.0, 20.0]
 
 def test_update_once_applies_real_pause_after_delayed_429(monkeypatch):
     snapshots.clear()
