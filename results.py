@@ -1228,7 +1228,14 @@ def _update_once(
     session: Optional[requests.sessions.Session] = None,
     now: Optional[float] = None,
 ) -> None:
-    current_time = now if now is not None else time.time()
+    time_source = time.time
+    reference_time = time_source()
+    time_offset = (now - reference_time) if now is not None else 0.0
+
+    def refresh_current_time() -> float:
+        return time_source() + time_offset
+
+    current_time = now if now is not None else reference_time
     try:
         with app.app_context():
             links = overlay_links_supplier() or {}
@@ -1236,7 +1243,15 @@ def _update_once(
         logger.warning("Nie udało się pobrać listy kortów: %s", exc)
         return
 
+    first_iteration = True
     for kort_id, urls in links.items():
+        if first_iteration:
+            if now is None:
+                current_time = refresh_current_time()
+            first_iteration = False
+        else:
+            current_time = refresh_current_time()
+
         if not (urls or {}).get("enabled", True):
             logger.debug("Pominięto kort %s - polling wyłączony", kort_id)
             continue
@@ -1298,6 +1313,7 @@ def _update_once(
         if not command:
             state.tick_counter += 1
             _record_tick()
+            current_time = refresh_current_time()
             state.mark_polled(current_time)
             continue
 
@@ -1435,6 +1451,7 @@ def _update_once(
                         except Exception:  # noqa: BLE001
                             pass
 
+                        current_time = refresh_current_time()
                         retry_after_seconds = _parse_retry_after(response)
                         reset_timestamp = _parse_rate_limit_reset(
                             response, reference_time=current_time
@@ -1579,6 +1596,7 @@ def _update_once(
             state.clear_pause()
 
         if final_snapshot is not None:
+            current_time = refresh_current_time()
             _record_snapshot_metrics(final_snapshot)
             _process_snapshot(state, final_snapshot, current_time)
 
