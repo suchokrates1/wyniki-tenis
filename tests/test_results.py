@@ -25,7 +25,7 @@ from results import (
     snapshots,
     update_snapshot_for_kort,
 )
-from results_state_machine import CourtPhase
+from results_state_machine import CourtPhase, CourtPollingStage
 
 
 # --- Fixtures -----------------------------------------------------------------
@@ -474,6 +474,70 @@ def test_name_stabilization_triggers_points_schedule_and_snapshot_completion():
     assert current_snapshot["players"]["A"]["points"] == 30
     assert current_snapshot["players"]["B"]["points"] == 15
     assert state.phase is CourtPhase.LIVE_POINTS
+
+
+def test_off_stage_limits_requests_per_minute():
+    kort_id = "off-stage-limit"
+    state = results_module._ensure_court_state(kort_id)
+    state.phase_offset = 0.0
+    state._configure_phase_commands(now=0.0)
+
+    now = 0.0
+    off_payload = results_module._flatten_overlay_payload({"OverlayVisibility": "off"})
+    snapshot = results_module._merge_partial_payload(kort_id, off_payload)
+
+    results_module._process_snapshot(state, snapshot, now)
+
+    assert state.stage is CourtPollingStage.OFF
+    assert set(state.command_schedules.keys()) == {"OffProbeAvailability"}
+
+    schedule = state.command_schedules["OffProbeAvailability"]
+    assert schedule.spec.interval >= 60.0
+
+    run_times: list[float] = []
+    for _ in range(3):
+        next_due = state.peek_next_due()
+        assert next_due is not None
+        now = next_due + 0.001
+        spec = state.pop_due_command(now)
+        assert spec == "OffProbeAvailability"
+        command = results_module._select_command(state, spec)
+        assert command == "GetOverlayVisibility"
+        run_times.append(now)
+
+    assert all((later - earlier) >= 60.0 for earlier, later in zip(run_times, run_times[1:]))
+    assert len(state.command_history) == 3
+    assert all(name == "OffProbeAvailability" for _, name in state.command_history)
+
+
+def test_off_stage_restores_full_plan_when_available_returns():
+    kort_id = "off-stage-recovery"
+    state = results_module._ensure_court_state(kort_id)
+    state.phase_offset = 0.0
+    state._configure_phase_commands(now=0.0)
+
+    now = 0.0
+    off_payload = results_module._flatten_overlay_payload({"OverlayVisibility": "off"})
+    off_snapshot = results_module._merge_partial_payload(kort_id, off_payload)
+    results_module._process_snapshot(state, off_snapshot, now)
+
+    assert state.stage is CourtPollingStage.OFF
+    assert set(state.command_schedules.keys()) == {"OffProbeAvailability"}
+
+    now += 120.0
+    on_payload = results_module._flatten_overlay_payload({"OverlayVisibility": "on"})
+    on_snapshot = results_module._merge_partial_payload(kort_id, on_payload)
+    results_module._process_snapshot(state, on_snapshot, now)
+
+    assert state.stage is CourtPollingStage.NORMAL
+    plan_keys = set(state.command_schedules.keys())
+    assert {"GetNamePlayerA", "GetNamePlayerB", "ProbeAvailability"}.issubset(plan_keys)
+
+    command = results_module._select_command(state, "GetNamePlayerA")
+    assert command == "GetNamePlayerA"
+
+    overlay_command = results_module._select_command(state, "ProbeAvailability")
+    assert overlay_command == "GetOverlayVisibility"
 
 
 def test_map_command_responses_populates_snapshot_and_transitions():

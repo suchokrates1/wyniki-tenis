@@ -22,6 +22,13 @@ class CourtPhase(enum.Enum):
     FINISHED = "finished"
 
 
+class CourtPollingStage(enum.Enum):
+    """Execution stage for command scheduling (normal vs. OFF slow polling)."""
+
+    NORMAL = "normal"
+    OFF = "off"
+
+
 def _default_offset(kort_id: str) -> float:
     fingerprint = hashlib.sha1(str(kort_id).encode("utf-8")).hexdigest()
     return (int(fingerprint[:8], 16) % 700) / 100.0  # 0.00-6.99 s
@@ -139,7 +146,7 @@ class CommandSchedule:
 
 
 # Uwaga: nazwy komend są abstrakcyjne (mapujesz je później na konkretne API: Points A/B, Games A/B itd.)
-_COMMAND_SPECS: Dict[CourtPhase, List[CommandSpec]] = {
+_NORMAL_COMMAND_SPECS: Dict[CourtPhase, List[CommandSpec]] = {
     CourtPhase.IDLE_NAMES: [
         CommandSpec("GetNamePlayerA", interval=3.0, offset=0.0, initial_delay=0.0),
         CommandSpec("GetNamePlayerB", interval=3.0, offset=1.5, initial_delay=0.0),
@@ -171,13 +178,33 @@ _COMMAND_SPECS: Dict[CourtPhase, List[CommandSpec]] = {
     ],
 }
 
+_OFF_STAGE_COMMAND_SPECS: Dict[Optional[CourtPhase], List[CommandSpec]] = {
+    None: [
+        CommandSpec(
+            "OffProbeAvailability",
+            interval=60.0,
+            offset=0.0,
+            initial_delay=0.0,
+        ),
+    ]
+}
+
+_COMMAND_SPECS: Dict[
+    CourtPollingStage, Dict[Optional[CourtPhase], List[CommandSpec]]
+] = {
+    CourtPollingStage.NORMAL: _NORMAL_COMMAND_SPECS,
+    CourtPollingStage.OFF: _OFF_STAGE_COMMAND_SPECS,
+}
+
 
 @dataclass
 class CourtState:
     kort_id: str
     phase: CourtPhase = CourtPhase.IDLE_NAMES
+    stage: CourtPollingStage = CourtPollingStage.NORMAL
     last_polled: float = 0.0
     phase_started_at: float = 0.0
+    stage_started_at: float = 0.0
     finished_name_signature: Optional[str] = None
     finished_raw_signature: Optional[str] = None
     phase_offset: float = field(default=None)
@@ -208,9 +235,15 @@ class CourtState:
         self._configure_phase_commands(now=0.0)
 
     def _configure_phase_commands(self, now: float) -> None:
-        specs = _COMMAND_SPECS.get(self.phase, [])
+        stage_specs = _COMMAND_SPECS.get(self.stage, {})
+        specs = stage_specs.get(self.phase)
+        if specs is None:
+            specs = stage_specs.get(None, [])
         self.command_schedules = {spec.name: CommandSchedule(spec=spec) for spec in specs}
-        base_time = now + self.phase_offset
+        if self.stage is CourtPollingStage.OFF:
+            base_time = now
+        else:
+            base_time = now + self.phase_offset
         for schedule in self.command_schedules.values():
             schedule.reset(base_time, now)
 
@@ -231,6 +264,13 @@ class CourtState:
             self.finished_name_signature = None
             self.finished_raw_signature = None
         # przeładowanie harmonogramu komend dla nowej fazy
+        self._configure_phase_commands(now)
+
+    def set_stage(self, stage: CourtPollingStage, now: float) -> None:
+        if stage is self.stage:
+            return
+        self.stage = stage
+        self.stage_started_at = now
         self._configure_phase_commands(now)
 
     def compute_name_signature(self, snapshot: Dict[str, object]) -> str:
@@ -448,6 +488,7 @@ class CourtState:
 
 __all__ = [
     "CourtPhase",
+    "CourtPollingStage",
     "CourtState",
     "CommandSpec",
     "CommandSchedule",
