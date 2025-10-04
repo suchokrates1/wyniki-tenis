@@ -141,8 +141,8 @@ class CommandSchedule:
 # Uwaga: nazwy komend są abstrakcyjne (mapujesz je później na konkretne API: Points A/B, Games A/B itd.)
 _COMMAND_SPECS: Dict[CourtPhase, List[CommandSpec]] = {
     CourtPhase.IDLE_NAMES: [
-        CommandSpec("GetNamePlayerA", interval=1.0, offset=0.0, initial_delay=0.0),
-        CommandSpec("GetNamePlayerB", interval=1.0, offset=1.0, initial_delay=0.0),
+        CommandSpec("GetNamePlayerA", interval=3.0, offset=0.0, initial_delay=0.0),
+        CommandSpec("GetNamePlayerB", interval=3.0, offset=1.5, initial_delay=0.0),
         CommandSpec("ProbeAvailability", interval=60.0, offset=0.0, initial_delay=0.0),
     ],
     CourtPhase.PRE_START: [
@@ -379,6 +379,26 @@ class CourtState:
             )
         )
         selected = due[0]
+        name_due = [
+            schedule
+            for schedule in due
+            if schedule.spec.name in {"GetNamePlayerA", "GetNamePlayerB"}
+        ]
+        if len(name_due) >= 2:
+            preferred: Optional[str] = None
+            if self.last_command in {"GetNamePlayerA", "GetNamePlayerB"}:
+                preferred = (
+                    "GetNamePlayerB"
+                    if self.last_command == "GetNamePlayerA"
+                    else "GetNamePlayerA"
+                )
+            if preferred:
+                for candidate in name_due:
+                    if candidate.spec.name == preferred:
+                        selected = candidate
+                        break
+            else:
+                selected = name_due[0]
         selected.mark_run(now)
         self.last_command = selected.spec.name
         self.last_command_at = now

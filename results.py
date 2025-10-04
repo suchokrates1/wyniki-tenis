@@ -6,10 +6,9 @@ import re
 import threading
 import time
 import uuid
-from collections import deque
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
-from typing import Any, Callable, Deque, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 from urllib.parse import urlparse
 
 import requests
@@ -35,8 +34,8 @@ REQUEST_TIMEOUT_SECONDS = 5
 NAME_STABILIZATION_TICKS = 3
 
 PER_CONTROLAPP_MIN_INTERVAL_SECONDS = 1.0
-GLOBAL_RATE_LIMIT_PER_SECOND = 4
-GLOBAL_RATE_WINDOW_SECONDS = 1.0
+GLOBAL_RATE_LIMIT_PER_SECOND = 2.0
+GLOBAL_TOKEN_BUCKET_CAPACITY = GLOBAL_RATE_LIMIT_PER_SECOND
 MAX_RETRY_ATTEMPTS = 3
 RETRY_BASE_DELAY_SECONDS = 5.0
 RETRY_MAX_DELAY_SECONDS = 120.0
@@ -253,8 +252,9 @@ court_states: Dict[str, CourtState] = {}
 
 _throttle_lock = threading.Lock()
 _last_request_by_controlapp: Dict[str, float] = {}
-_recent_request_timestamps: Deque[float] = deque()
 _next_allowed_request_by_controlapp: Dict[str, float] = {}
+_global_token_balance: float = GLOBAL_TOKEN_BUCKET_CAPACITY
+_global_tokens_last_refill: Optional[float] = time.time()
 
 
 def _shorten_for_logging(text: str, max_length: int = 256) -> str:
@@ -373,6 +373,21 @@ def _throttle_request(
     while True:
         with _throttle_lock:
             now_value = simulated_time if simulated_time is not None else time.time()
+            global _global_token_balance, _global_tokens_last_refill
+
+            last_refill = _global_tokens_last_refill
+            if last_refill is None:
+                last_refill = now_value
+                _global_tokens_last_refill = now_value
+            elapsed = max(0.0, now_value - last_refill)
+            if elapsed > 0.0:
+                refill = elapsed * GLOBAL_RATE_LIMIT_PER_SECOND
+                _global_token_balance = min(
+                    GLOBAL_TOKEN_BUCKET_CAPACITY,
+                    _global_token_balance + refill,
+                )
+                _global_tokens_last_refill = now_value
+
             last = _last_request_by_controlapp.get(controlapp_id)
             wait_for_controlapp = 0.0
             if last is not None:
@@ -383,22 +398,20 @@ def _throttle_request(
             if cooldown_until is not None:
                 wait_for_cooldown = cooldown_until - now_value
 
-            while _recent_request_timestamps and now_value - _recent_request_timestamps[0] >= GLOBAL_RATE_WINDOW_SECONDS:
-                _recent_request_timestamps.popleft()
-
-            global_available = len(_recent_request_timestamps) < GLOBAL_RATE_LIMIT_PER_SECOND
+            global_available = _global_token_balance >= 1.0 - 1e-9
 
             if wait_for_controlapp <= 0 and wait_for_cooldown <= 0 and global_available:
                 _last_request_by_controlapp[controlapp_id] = now_value
-                _recent_request_timestamps.append(now_value)
+                _global_token_balance = max(0.0, _global_token_balance - 1.0)
                 if cooldown_until is not None and now_value + 1e-9 >= cooldown_until:
                     _next_allowed_request_by_controlapp.pop(controlapp_id, None)
                 return
 
             wait_time = max(wait_for_controlapp, wait_for_cooldown, 0.0)
-            if not global_available and _recent_request_timestamps:
-                earliest = _recent_request_timestamps[0]
-                wait_time = max(wait_time, earliest + GLOBAL_RATE_WINDOW_SECONDS - now_value)
+            if not global_available:
+                deficit = max(0.0, 1.0 - _global_token_balance)
+                wait_for_tokens = deficit / GLOBAL_RATE_LIMIT_PER_SECOND
+                wait_time = max(wait_time, wait_for_tokens)
 
         if simulated_time is not None:
             simulated_time = now_value + wait_time

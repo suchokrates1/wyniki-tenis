@@ -6,6 +6,7 @@ import shutil
 import subprocess
 import sys
 import textwrap
+from collections import defaultdict
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -42,8 +43,11 @@ def setup_function(function):
     snapshots.clear()
     results_module.court_states.clear()
     results_module._last_request_by_controlapp.clear()
-    results_module._recent_request_timestamps.clear()
     results_module._next_allowed_request_by_controlapp.clear()
+    results_module._global_token_balance = (
+        results_module.GLOBAL_TOKEN_BUCKET_CAPACITY
+    )
+    results_module._global_tokens_last_refill = results_module.time.time()
 
 
 # --- Testy widoku /wyniki -----------------------------------------------------
@@ -857,19 +861,16 @@ def test_update_once_cycles_commands_and_transitions(monkeypatch):
     def consecutive_diffs(times):
         return [round(b - a, 6) for a, b in zip(times, times[1:])]
 
-    idle_command_times = [time for time, _ in history if time < 30]
-    assert idle_command_times
-    assert len(idle_command_times) >= stabilization_ticks
-    initial_idle_diffs = consecutive_diffs(
-        idle_command_times[: max(stabilization_ticks, 1)]
+    idle_name_history = [
+        (time, name)
+        for time, name in history
+        if time < 30 and name in {"GetNamePlayerA", "GetNamePlayerB"}
+    ]
+    assert idle_name_history
+    assert all(
+        prev[1] != curr[1]
+        for prev, curr in zip(idle_name_history, idle_name_history[1:])
     )
-    if initial_idle_diffs:
-        assert all(diff == 1 for diff in initial_idle_diffs)
-    remaining_idle_diffs = consecutive_diffs(
-        idle_command_times[max(stabilization_ticks - 1, 0) :]
-    )
-    if remaining_idle_diffs:
-        assert all(diff >= 2 for diff in remaining_idle_diffs)
 
     idle_a_times = [
         time for time, name in history if name == "GetNamePlayerA" and time < 30
@@ -878,6 +879,15 @@ def test_update_once_cycles_commands_and_transitions(monkeypatch):
         time for time, name in history if name == "GetNamePlayerB" and time < 30
     ]
     assert idle_a_times and idle_b_times
+
+    def assert_min_interval(times: list[float]) -> None:
+        diffs = consecutive_diffs(times)
+        if diffs:
+            assert all(diff >= 3 for diff in diffs)
+
+    assert_min_interval(idle_a_times)
+    assert_min_interval(idle_b_times)
+
     paired_idle = list(zip(idle_a_times, idle_b_times))
     assert paired_idle and all(1 <= round(b - a, 6) <= 2 for a, b in paired_idle)
 
@@ -1371,6 +1381,107 @@ def test_update_once_applies_pause_after_consecutive_429(monkeypatch):
     fake_time.current = expected_pause - 10
     results_module._update_once(app, supplier, session=session, now=fake_time.time())
     assert len(session.requests) == 3
+
+
+def test_token_bucket_limits_requests_across_courts(monkeypatch):
+    snapshots.clear()
+    results_module.court_states.clear()
+
+    overlay_links = {
+        str(index): {"control": f"https://app.overlays.uno/control/court{index}"}
+        for index in range(1, 5)
+    }
+
+    def supplier():
+        return overlay_links
+
+    fake_time = TimeController(start=0.0)
+    monkeypatch.setattr(results_module.time, "time", fake_time.time)
+    monkeypatch.setattr(results_module.time, "sleep", fake_time.sleep)
+    monkeypatch.setattr(results_state_machine, "_default_offset", lambda *_: 0.0)
+
+    results_module._global_token_balance = (
+        results_module.GLOBAL_TOKEN_BUCKET_CAPACITY
+    )
+    results_module._global_tokens_last_refill = fake_time.time()
+
+    base_payload = {
+        "PlayerA": {"value": "Player One"},
+        "PlayerB": {"value": "Player Two"},
+    }
+
+    class TimedSession(DummySession):
+        def __init__(self, response):
+            super().__init__(response)
+            self.request_times: list[float] = []
+
+        def put(self, url: str, timeout: int, json: dict | None = None):
+            self.request_times.append(fake_time.time())
+            return super().put(url, timeout=timeout, json=json)
+
+    session = TimedSession(DummyResponse(base_payload))
+
+    identifier_to_kort = {f"court{index}": str(index) for index in range(1, 5)}
+
+    total_ticks = 12
+    for _ in range(total_ticks):
+        tick_start = fake_time.time()
+        results_module._update_once(app, supplier, session=session, now=tick_start)
+        elapsed = fake_time.time() - tick_start
+        remaining = max(0.0, results_module.UPDATE_INTERVAL_SECONDS - elapsed)
+        fake_time.sleep(remaining)
+
+    assert session.requests
+    assert len(session.requests) == len(session.request_times)
+
+    per_player_times: dict[str, dict[str, list[float]]] = defaultdict(
+        lambda: defaultdict(list)
+    )
+    per_court_sequences: dict[str, list[str]] = defaultdict(list)
+
+    for request, timestamp in zip(session.requests, session.request_times):
+        payload = request.get("json") or {}
+        command = None
+        if isinstance(payload, dict):
+            command = payload.get("command")
+        if not isinstance(command, str):
+            continue
+
+        url = str(request.get("url") or "")
+        parts = url.rstrip("/").split("/")
+        if len(parts) < 2:
+            continue
+        identifier = parts[-2]
+        kort_id = identifier_to_kort.get(identifier)
+        if not kort_id:
+            continue
+
+        if command.startswith("GetNamePlayer"):
+            player = command[-1]
+            per_player_times[kort_id][player].append(timestamp)
+            per_court_sequences[kort_id].append(command)
+
+    assert per_player_times
+
+    for kort_id, players in per_player_times.items():
+        sequences = per_court_sequences.get(kort_id, [])
+        assert sequences
+        assert all(prev != curr for prev, curr in zip(sequences, sequences[1:]))
+
+        for player, times in players.items():
+            assert times
+            times.sort()
+            diffs = [round(b - a, 6) for a, b in zip(times, times[1:])]
+            if diffs:
+                assert all(diff >= 3 for diff in diffs)
+
+    request_times = session.request_times
+    assert request_times
+    if len(request_times) >= 2:
+        duration = request_times[-1] - request_times[0]
+        assert duration > 0
+        average_rps = len(request_times) / duration
+        assert 1.0 <= average_rps <= 2.3
 
 
 def test_calculate_retry_delay_without_headers_uses_minimum_backoff(monkeypatch):
