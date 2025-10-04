@@ -26,6 +26,7 @@ import requests
 from results import (
     build_output_url,
     get_metrics_snapshot,
+    get_all_snapshots,
     snapshots,
     start_background_updater,
 )
@@ -1277,8 +1278,15 @@ def index():
     )
 
 
+def _get_snapshots_with_fallback() -> dict[str, dict[str, object]]:
+    current = get_all_snapshots()
+    if current:
+        return current
+    return load_snapshots()
+
+
 def build_wyniki_context():
-    snapshots = load_snapshots()
+    snapshots = _get_snapshots_with_fallback()
     links = overlay_links_by_kort_id()
 
     hidden_ids = {str(kort_id) for kort_id, meta in links.items() if (meta or {}).get("hidden")}
@@ -1379,7 +1387,7 @@ def overlay_kort(kort_id):
     mini_config = kort_all_config.get("top_left") or get_default_corner_config("top_left")
     mini_label_style = build_label_style(mini_config.get("label"))
 
-    snapshots = load_snapshots()
+    snapshots = _get_snapshots_with_fallback()
     main_overlay = links_by_id[kort_id]["overlay"]
     main_snapshot = normalize_snapshot_entry(
         kort_id,
@@ -1522,7 +1530,7 @@ def overlay_all():
 
     overlays = []
     sorted_overlays = [link.to_dict() for link in get_overlay_links() if not link.hidden]
-    snapshots = load_snapshots()
+    snapshots = _get_snapshots_with_fallback()
 
     for link, corner_key in zip(sorted_overlays, CORNERS):
         kort_id = link["kort_id"]
