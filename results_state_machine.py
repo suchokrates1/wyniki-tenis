@@ -247,14 +247,18 @@ class CourtState:
             return str(raw)
         return _fingerprint(raw)
 
-    def update_name_stability(self, signature: str) -> None:
-        # pusta lub „nie-sensowna” sygnatura resetuje stabilność
-        if not signature or not any(part.strip() for part in signature.split("|")):
+    def update_name_stability(self, signature: str, *, required_ticks: int) -> None:
+        parts = [part.strip() for part in signature.split("|")] if signature else []
+        has_all_names = parts and all(parts)
+
+        if not has_all_names:
             self.name_stability = 0
             self.last_name_signature = signature
             return
+
         if signature == self.last_name_signature:
-            self.name_stability = min(self.name_stability + 1, 10_000)
+            cap = required_ticks if required_ticks > 0 else 10_000
+            self.name_stability = min(self.name_stability + 1, cap)
         else:
             self.name_stability = 1
         self.last_name_signature = signature

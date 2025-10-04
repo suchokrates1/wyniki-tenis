@@ -380,6 +380,33 @@ def test_partial_updates_allow_state_progression():
     assert snapshot["last_updated"] is not None
 
 
+def test_complete_names_trigger_pre_start_within_three_ticks():
+    kort_id = "fast-names"
+    state = results_module._ensure_court_state(kort_id)
+    state.phase_offset = 0.0
+    state._configure_phase_commands(now=0.0)
+
+    payload = results_module._flatten_overlay_payload(
+        {"NamePlayerA": "A. Kowalski", "NamePlayerB": "B. Zielińska"}
+    )
+    snapshot = results_module._merge_partial_payload(kort_id, payload)
+
+    now = 0.0
+    results_module._process_snapshot(state, snapshot, now)
+
+    additional_ticks = max(results_module.NAME_STABILIZATION_TICKS - 1, 0)
+    for _ in range(additional_ticks):
+        now += 1.0
+        results_module._process_snapshot(state, snapshot, now)
+
+    assert results_module.NAME_STABILIZATION_TICKS <= 3
+    assert state.phase is CourtPhase.PRE_START
+
+    schedule = state.command_schedules.get("GetPoints")
+    assert schedule is not None
+    assert schedule.next_due is not None
+
+
 def test_name_stabilization_triggers_points_schedule_and_snapshot_completion():
     kort_id = "phase-schedule"
     state = results_module._ensure_court_state(kort_id)
@@ -774,23 +801,42 @@ def test_update_once_cycles_commands_and_transitions(monkeypatch):
     assert archive and len(archive) >= 1
     assert archive[0]["players"]["A"]["name"] == "Player One"
     assert snapshots["1"]["players"]["A"]["name"] == "New Player"
-    assert any(phase == CourtPhase.IDLE_NAMES for tick, phase, _ in phase_log if tick >= 160)
+    assert any(
+        phase in {CourtPhase.IDLE_NAMES, CourtPhase.PRE_START}
+        for tick, phase, _ in phase_log
+        if tick >= 160
+    )
     assert state.phase in {CourtPhase.FINISHED, CourtPhase.IDLE_NAMES, CourtPhase.PRE_START}
 
     first_non_idle_tick = next(
         (tick for tick, phase, _ in phase_log if phase is not CourtPhase.IDLE_NAMES),
         None,
     )
-    assert first_non_idle_tick is None or first_non_idle_tick >= 11
-    assert any(phase == CourtPhase.PRE_START for tick, phase, _ in phase_log if 12 <= tick < 40)
-    assert any(phase == CourtPhase.LIVE_POINTS for tick, phase, _ in phase_log if 40 <= tick < 60)
-    assert any(phase == CourtPhase.LIVE_GAMES for tick, phase, _ in phase_log if 60 <= tick < 80)
-    assert any(phase == CourtPhase.LIVE_SETS for tick, phase, _ in phase_log if 80 <= tick < 90)
-    assert any(phase == CourtPhase.TIEBREAK7 for tick, phase, _ in phase_log if 90 <= tick < 100)
-    assert any(phase == CourtPhase.SUPER_TB10 for tick, phase, _ in phase_log if 100 <= tick < 110)
-    assert any(phase == CourtPhase.FINISHED for tick, phase, _ in phase_log if 110 <= tick < 140)
+    stabilization_ticks = results_module.NAME_STABILIZATION_TICKS
+    max_expected_tick = max(stabilization_ticks + 1, 1)
+    assert first_non_idle_tick is None or first_non_idle_tick <= max_expected_tick
+    phases_under_40 = {phase for tick, phase, _ in phase_log if tick < 40}
+    assert CourtPhase.PRE_START in phases_under_40
+    assert any(
+        phase == CourtPhase.LIVE_POINTS for tick, phase, _ in phase_log if 40 <= tick < 60
+    )
+    assert any(
+        phase == CourtPhase.LIVE_GAMES for tick, phase, _ in phase_log if 60 <= tick < 80
+    )
+    assert any(
+        phase == CourtPhase.LIVE_SETS for tick, phase, _ in phase_log if 80 <= tick < 90
+    )
+    assert any(
+        phase == CourtPhase.TIEBREAK7 for tick, phase, _ in phase_log if 90 <= tick < 100
+    )
+    assert any(
+        phase == CourtPhase.SUPER_TB10 for tick, phase, _ in phase_log if 100 <= tick < 110
+    )
+    assert any(
+        phase == CourtPhase.FINISHED for tick, phase, _ in phase_log if 110 <= tick < 140
+    )
     idle_stability = [stability for tick, phase, stability in phase_log if tick < 30]
-    assert idle_stability and max(idle_stability) >= 12
+    assert idle_stability and max(idle_stability) >= stabilization_ticks
 
     history = state.command_history
     early_name_specs = [
@@ -801,7 +847,7 @@ def test_update_once_cycles_commands_and_transitions(monkeypatch):
     assert early_name_specs
     assert early_name_specs[0] == "GetNamePlayerA"
     assert "GetNamePlayerB" in early_name_specs[:3]
-    assert early_name_specs.count("GetNamePlayerA") >= 2
+    assert early_name_specs.count("GetNamePlayerA") >= 1
     assert set(early_name_specs).issubset({"GetNamePlayerA", "GetNamePlayerB"})
     assert any(
         name == "ProbeAvailability" and time < 10 for time, name in history
@@ -812,7 +858,17 @@ def test_update_once_cycles_commands_and_transitions(monkeypatch):
 
     idle_command_times = [time for time, _ in history if time < 30]
     assert idle_command_times
-    assert all(diff == 1 for diff in consecutive_diffs(idle_command_times[:8]))
+    assert len(idle_command_times) >= stabilization_ticks
+    initial_idle_diffs = consecutive_diffs(
+        idle_command_times[: max(stabilization_ticks, 1)]
+    )
+    if initial_idle_diffs:
+        assert all(diff == 1 for diff in initial_idle_diffs)
+    remaining_idle_diffs = consecutive_diffs(
+        idle_command_times[max(stabilization_ticks - 1, 0) :]
+    )
+    if remaining_idle_diffs:
+        assert all(diff >= 2 for diff in remaining_idle_diffs)
 
     idle_a_times = [
         time for time, name in history if name == "GetNamePlayerA" and time < 30
@@ -825,7 +881,7 @@ def test_update_once_cycles_commands_and_transitions(monkeypatch):
     assert paired_idle and all(1 <= round(b - a, 6) <= 2 for a, b in paired_idle)
 
     pre_start_points = [
-        time for time, name in history if name == "GetPoints" and 12 <= time < 40
+        time for time, name in history if name == "GetPoints" and time < 40
     ]
     assert pre_start_points
     assert all(diff == 2 for diff in consecutive_diffs(pre_start_points))

@@ -32,7 +32,7 @@ _SENSITIVE_FIELD_MARKERS = (
 
 UPDATE_INTERVAL_SECONDS = 1
 REQUEST_TIMEOUT_SECONDS = 5
-NAME_STABILIZATION_TICKS = 12
+NAME_STABILIZATION_TICKS = 3
 
 PER_CONTROLAPP_MIN_INTERVAL_SECONDS = 1.0
 GLOBAL_RATE_LIMIT_PER_SECOND = 4
@@ -1269,7 +1269,11 @@ def _classify_phase(
     elif not has_any_name:
         return CourtPhase.IDLE_NAMES
 
-    if state.phase is CourtPhase.IDLE_NAMES and state.name_stability < 12:
+    if (
+        state.phase is CourtPhase.IDLE_NAMES
+        and NAME_STABILIZATION_TICKS > 0
+        and state.name_stability < NAME_STABILIZATION_TICKS
+    ):
         return CourtPhase.IDLE_NAMES
 
     if (
@@ -1311,7 +1315,9 @@ def _classify_phase(
 def _process_snapshot(state: CourtState, snapshot: Dict[str, Any], now: float) -> None:
     state.mark_polled(now)
     name_signature = state.compute_name_signature(snapshot)
-    state.update_name_stability(name_signature)
+    state.update_name_stability(
+        name_signature, required_ticks=NAME_STABILIZATION_TICKS
+    )
     score_snapshot = state.compute_score_snapshot(snapshot)
     state.update_score_stability(score_snapshot)
     desired_phase = _classify_phase(snapshot, state, score_snapshot)
