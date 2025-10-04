@@ -689,14 +689,19 @@ def test_update_once_cycles_commands_and_transitions(monkeypatch):
     assert idle_stability and max(idle_stability) >= 12
 
     history = state.command_history
-    early_names = [name for time, name in history if time < 6]
-    assert early_names[:4] == [
-        "GetNamePlayerA",
-        "GetNamePlayerB",
-        "GetNamePlayerA",
-        "GetNamePlayerB",
+    early_name_specs = [
+        name
+        for time, name in history
+        if time < 6 and name in {"GetNamePlayerA", "GetNamePlayerB"}
     ]
-    assert set(early_names).issubset({"GetNamePlayerA", "GetNamePlayerB"})
+    assert early_name_specs
+    assert early_name_specs[0] == "GetNamePlayerA"
+    assert "GetNamePlayerB" in early_name_specs[:3]
+    assert early_name_specs.count("GetNamePlayerA") >= 2
+    assert set(early_name_specs).issubset({"GetNamePlayerA", "GetNamePlayerB"})
+    assert any(
+        name == "ProbeAvailability" and time < 10 for time, name in history
+    )
 
     def consecutive_diffs(times):
         return [round(b - a, 6) for a, b in zip(times, times[1:])]
@@ -713,7 +718,7 @@ def test_update_once_cycles_commands_and_transitions(monkeypatch):
     ]
     assert idle_a_times and idle_b_times
     paired_idle = list(zip(idle_a_times, idle_b_times))
-    assert paired_idle and all(round(b - a, 6) == 1 for a, b in paired_idle)
+    assert paired_idle and all(1 <= round(b - a, 6) <= 2 for a, b in paired_idle)
 
     pre_start_points = [
         time for time, name in history if name == "GetPoints" and 12 <= time < 40
@@ -772,6 +777,7 @@ def test_update_once_cycles_commands_and_transitions(monkeypatch):
         CourtPhase.IDLE_NAMES: {
             "GetNamePlayerA": {"GetNamePlayerA"},
             "GetNamePlayerB": {"GetNamePlayerB"},
+            "ProbeAvailability": {"GetOverlayVisibility"},
         },
         CourtPhase.PRE_START: {
             "GetPoints": {
@@ -1153,6 +1159,84 @@ def test_update_once_switches_polling_when_overlay_unavailable(monkeypatch):
     assert len(session.requests) == 2
     assert state.availability_paused_until is None
     assert not state.is_paused(fake_time.current)
+
+
+def test_idle_names_overlay_probe_limits_request_frequency(monkeypatch):
+    snapshots.clear()
+    results_module.court_states.clear()
+
+    overlay_links = {
+        "1": {"control": "https://app.overlays.uno/control/idle-probe"}
+    }
+
+    def supplier():
+        return overlay_links
+
+    session = SequenceSession(
+        [
+            DummyResponse({"PlayerA": {"Value": ""}}, status_code=200),
+            DummyResponse({"OverlayVisibility": "off"}, status_code=200),
+            DummyResponse({"OverlayVisibility": "on"}, status_code=200),
+        ]
+    )
+
+    fake_time = TimeController(start=0.0)
+    monkeypatch.setattr(results_module.time, "time", fake_time.time)
+    monkeypatch.setattr(results_module.time, "sleep", fake_time.sleep)
+    monkeypatch.setattr(results_module.random, "uniform", lambda *_: 0.0)
+    monkeypatch.setattr(results_state_machine, "_default_offset", lambda *_: 0.0)
+
+    first_tick = fake_time.time()
+    results_module._update_once(
+        app, supplier, session=session, now=first_tick
+    )
+
+    assert len(session.requests) == 1
+    assert session.requests[0]["json"] == {"command": "GetNamePlayerA"}
+
+    pause_start = fake_time.time()
+    results_module._update_once(
+        app, supplier, session=session, now=pause_start
+    )
+
+    assert len(session.requests) == 2
+    assert session.requests[1]["json"] == {"command": "GetOverlayVisibility"}
+
+    state = results_module.court_states["1"]
+    assert state.availability_paused_until is not None
+    assert state.availability_paused_until == pytest.approx(
+        pause_start + results_module.UNAVAILABLE_SLOW_POLL_SECONDS, rel=1e-6
+    )
+    assert state.is_paused(pause_start)
+
+    fake_time.current = pause_start + 30.0
+    results_module._update_once(
+        app, supplier, session=session, now=fake_time.time()
+    )
+
+    assert len(session.requests) == 2
+    assert state.is_paused(fake_time.time())
+
+    fake_time.current = pause_start + 59.5
+    results_module._update_once(
+        app, supplier, session=session, now=fake_time.time()
+    )
+
+    assert len(session.requests) == 2
+    assert state.is_paused(fake_time.time())
+
+    fake_time.current = pause_start + 60.0
+    results_module._update_once(
+        app, supplier, session=session, now=fake_time.time()
+    )
+
+    assert len(session.requests) == 3
+    assert session.requests[2]["json"]["command"] in {
+        "GetNamePlayerA",
+        "GetNamePlayerB",
+    }
+    assert state.availability_paused_until is None
+    assert not state.is_paused(fake_time.time())
 
 
 def test_update_once_logs_details_on_retry_exhaustion(monkeypatch, caplog):

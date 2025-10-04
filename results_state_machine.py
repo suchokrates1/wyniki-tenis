@@ -143,6 +143,7 @@ _COMMAND_SPECS: Dict[CourtPhase, List[CommandSpec]] = {
     CourtPhase.IDLE_NAMES: [
         CommandSpec("GetNamePlayerA", interval=1.0, offset=0.0, initial_delay=0.0),
         CommandSpec("GetNamePlayerB", interval=1.0, offset=1.0, initial_delay=0.0),
+        CommandSpec("ProbeAvailability", interval=60.0, offset=0.0, initial_delay=0.0),
     ],
     CourtPhase.PRE_START: [
         CommandSpec("GetPoints", interval=2.0, initial_delay=2.0),
