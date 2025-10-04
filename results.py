@@ -670,6 +670,185 @@ def _flatten_overlay_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
     return flat
 
 
+def _map_command_response(command: str, payload: Dict[str, Any]) -> Dict[str, Any]:
+    flattened = _flatten_overlay_payload(payload)
+    mapped: Dict[str, Any] = dict(flattened)
+
+    command = command or ""
+
+    def _ensure_player_entry(suffix: str) -> Dict[str, Any]:
+        player_key = f"Player{suffix}"
+        existing = mapped.get(player_key)
+        if isinstance(existing, dict):
+            entry = existing
+        elif existing is None:
+            entry = {}
+            mapped[player_key] = entry
+        else:
+            entry = {"Value": existing}
+            mapped[player_key] = entry
+        return entry
+
+    def _assign_player_field(suffix: str, field: str, value: Any) -> None:
+        key = f"{field}Player{suffix}"
+        mapped[key] = value
+        entry = _ensure_player_entry(suffix)
+        entry[field] = value
+
+    def _extract_from_player(
+        suffix: str, keys: List[str], fallback_keys: Optional[List[str]] = None
+    ) -> Optional[Any]:
+        for key in keys:
+            candidate_key = key.format(player=suffix)
+            if candidate_key in flattened:
+                return flattened[candidate_key]
+
+        player_key = f"Player{suffix}"
+        nested = flattened.get(player_key)
+        if isinstance(nested, dict):
+            for key in keys:
+                normalized_key = key.replace("Player{player}", "")
+                normalized_key = normalized_key.replace("{player}", "")
+                candidate = nested.get(normalized_key) or nested.get(
+                    normalized_key.capitalize()
+                )
+                if candidate is not None:
+                    return candidate
+        elif nested is not None:
+            return nested
+
+        if fallback_keys:
+            for key in fallback_keys:
+                if key in flattened:
+                    return flattened[key]
+        return None
+
+    player_suffix: Optional[str] = None
+    player_match = re.search(r"Player([AB])$", command)
+    if player_match:
+        player_suffix = player_match.group(1)
+
+    if command.startswith("GetNamePlayer") and player_suffix:
+        value = _extract_from_player(
+            player_suffix,
+            [f"NamePlayer{{player}}", "Name", "name", "Value", "value"],
+        )
+        if value is not None:
+            _assign_player_field(player_suffix, "Name", value)
+
+    elif command.startswith("GetPointsPlayer") and player_suffix:
+        value = _extract_from_player(
+            player_suffix,
+            [f"PointsPlayer{{player}}", "Points", "points", "Value", "value"],
+        )
+        if value is not None:
+            _assign_player_field(player_suffix, "Points", value)
+
+    elif command.startswith("GetCurrentSetPlayer") and player_suffix:
+        value = _extract_from_player(
+            player_suffix,
+            [
+                f"CurrentSetPlayer{{player}}",
+                "CurrentSet",
+                "current_set",
+                "Value",
+                "value",
+            ],
+        )
+        if value is not None:
+            _assign_player_field(player_suffix, "CurrentSet", value)
+
+    elif command.startswith("GetTieBreakPlayer") and player_suffix:
+        value = _extract_from_player(
+            player_suffix,
+            [
+                f"TieBreakPlayer{{player}}",
+                "TieBreak",
+                "tiebreak",
+                "Value",
+                "value",
+            ],
+        )
+        if value is not None:
+            _assign_player_field(player_suffix, "TieBreak", value)
+
+    elif command == "GetServe":
+        server_indicator: Optional[str] = None
+        for key in ("Server", "Serve", "CurrentServer", "value", "Value"):
+            candidate = flattened.get(key)
+            if isinstance(candidate, str):
+                normalized = candidate.strip().upper()
+                if normalized in {"A", "B"}:
+                    server_indicator = normalized
+                    break
+
+        if server_indicator is not None:
+            mapped[f"ServePlayer{server_indicator}"] = True
+            _ensure_player_entry(server_indicator)["Serve"] = True
+            other = "B" if server_indicator == "A" else "A"
+            mapped[f"ServePlayer{other}"] = False
+            _ensure_player_entry(other)["Serve"] = False
+        else:
+            for suffix in ("A", "B"):
+                candidate = _extract_from_player(
+                    suffix,
+                    [f"ServePlayer{{player}}", f"Player{{player}}", suffix],
+                    fallback_keys=[f"Serve{suffix}"]
+                )
+                if candidate is None:
+                    continue
+                interpreted = _interpret_visibility_value(candidate)
+                if interpreted is None:
+                    if isinstance(candidate, (int, float)):
+                        interpreted = candidate != 0
+                    elif isinstance(candidate, str):
+                        interpreted = candidate.strip().lower() in {"true", "tak", "on", "1"}
+                if interpreted is None:
+                    continue
+                mapped[f"ServePlayer{suffix}"] = interpreted
+                _ensure_player_entry(suffix)["Serve"] = interpreted
+
+    elif command == "GetOverlayVisibility":
+        interpreted: Optional[bool] = None
+        for key in flattened.keys():
+            interpreted = _interpret_visibility_value(flattened[key])
+            if interpreted is not None:
+                break
+        if interpreted is not None:
+            mapped["OverlayVisibility"] = interpreted
+
+    elif command == "GetTieBreakVisibility":
+        interpreted: Optional[bool] = None
+        for key in flattened.keys():
+            interpreted = _interpret_visibility_value(flattened[key])
+            if interpreted is not None:
+                break
+        if interpreted is not None:
+            mapped["TieBreakVisibility"] = interpreted
+
+    elif command == "GetMode":
+        value = None
+        for key in ("Mode", "mode", "Value", "value"):
+            if key in flattened:
+                value = flattened[key]
+                break
+        if value is not None:
+            mapped["Mode"] = value
+
+    elif command == "GetSet":
+        for key, value in list(flattened.items()):
+            match = _PLAYER_FIELD_PATTERN.match(str(key))
+            if not match:
+                continue
+            field, suffix = match.groups()
+            _assign_player_field(suffix, field, value)
+
+    if player_suffix and command.startswith("GetTieBreakPlayer"):
+        mapped.setdefault("TieBreakVisibility", mapped.get("TieBreakVisibility"))
+
+    return mapped
+
+
 def _interpret_visibility_value(value: Any) -> Optional[bool]:
     if isinstance(value, bool):
         return value
@@ -1522,8 +1701,8 @@ def _update_once(
                             _format_payload_for_logging(payload),
                             rate_limits_desc,
                         )
-                        flattened = _flatten_overlay_payload(payload)
-                        final_snapshot = _merge_partial_payload(kort_id, flattened)
+                        mapped_payload = _map_command_response(command, payload)
+                        final_snapshot = _merge_partial_payload(kort_id, mapped_payload)
                         command_succeeded = True
                         break
             finally:

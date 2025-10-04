@@ -443,6 +443,47 @@ def test_name_stabilization_triggers_points_schedule_and_snapshot_completion():
     assert current_snapshot["players"]["B"]["points"] == 15
     assert state.phase is CourtPhase.LIVE_POINTS
 
+
+def test_map_command_responses_populates_snapshot_and_transitions():
+    kort_id = "map-responses"
+    state = results_module._ensure_court_state(kort_id)
+    now = 0.0
+    snapshot = {}
+
+    commands = [
+        ("GetNamePlayerA", {"value": "A. Kowalski"}),
+        ("GetNamePlayerB", {"Value": "B. Nowak"}),
+        ("GetOverlayVisibility", {"value": "on"}),
+        ("GetMode", {"value": "Match"}),
+        ("GetServe", {"Value": "A"}),
+        ("GetPointsPlayerA", {"Value": 30}),
+        ("GetPointsPlayerB", {"value": 15}),
+    ]
+
+    for command, payload in commands:
+        mapped = results_module._map_command_response(command, payload)
+        snapshot = results_module._merge_partial_payload(kort_id, mapped)
+        results_module._process_snapshot(state, snapshot, now)
+        now += 1.0
+        if command == "GetNamePlayerB":
+            for _ in range(results_module.NAME_STABILIZATION_TICKS):
+                now += 1.0
+                results_module._process_snapshot(state, snapshot, now)
+
+    assert snapshot["status"] == SNAPSHOT_STATUS_OK
+    assert snapshot["available"] is True
+    assert snapshot["serving"] == "A"
+
+    players = snapshot["players"]
+    assert players["A"]["name"] == "A. Kowalski"
+    assert players["B"]["name"] == "B. Nowak"
+    assert players["A"]["points"] == 30
+    assert players["B"]["points"] == 15
+    assert players["A"]["is_serving"] is True
+    assert players["B"]["is_serving"] is False
+    assert state.phase is not CourtPhase.IDLE_NAMES
+
+
 def test_archive_snapshot_capped_to_limit():
     kort_id = "archive-limit"
 
