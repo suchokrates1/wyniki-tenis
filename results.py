@@ -1076,11 +1076,18 @@ def _is_truthy(value: Any) -> bool:
 def _classify_phase(
     snapshot: Dict[str, Any], state: CourtState, score: ScoreSnapshot
 ) -> CourtPhase:
-    if snapshot.get("status") != SNAPSHOT_STATUS_OK:
-        return CourtPhase.IDLE_NAMES
-
     name_signature = state.compute_name_signature(snapshot)
-    if not any(part.strip() for part in name_signature.split("|")):
+    has_any_name = any(part.strip() for part in name_signature.split("|"))
+
+    status = snapshot.get("status")
+    if status != SNAPSHOT_STATUS_OK:
+        # Pozostań w IDLE dopóki nie ustabilizujemy nazwisk – nawet jeśli
+        # częściowe dane są już dostępne w innych polach.
+        if not has_any_name:
+            return CourtPhase.IDLE_NAMES
+        if state.name_stability < NAME_STABILIZATION_TICKS:
+            return CourtPhase.IDLE_NAMES
+    elif not has_any_name:
         return CourtPhase.IDLE_NAMES
 
     if state.phase is CourtPhase.IDLE_NAMES and state.name_stability < 12:

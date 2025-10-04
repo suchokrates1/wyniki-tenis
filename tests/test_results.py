@@ -360,7 +360,7 @@ def test_partial_updates_allow_state_progression():
         results_module._process_snapshot(state, snapshot, now)
 
     assert snapshot["status"] == SNAPSHOT_STATUS_NO_DATA
-    assert state.phase is CourtPhase.IDLE_NAMES
+    assert state.phase is CourtPhase.PRE_START
 
     third = results_module._flatten_overlay_payload(
         {"PointsPlayerA": 0, "PointsPlayerB": 0}
@@ -379,6 +379,69 @@ def test_partial_updates_allow_state_progression():
     assert snapshot.get("archive") == []
     assert snapshot["last_updated"] is not None
 
+
+def test_name_stabilization_triggers_points_schedule_and_snapshot_completion():
+    kort_id = "phase-schedule"
+    state = results_module._ensure_court_state(kort_id)
+    state.phase_offset = 0.0
+    state._configure_phase_commands(now=0.0)
+    now = 0.0
+
+    first = results_module._flatten_overlay_payload({"NamePlayerA": "A. Kowalski"})
+    snapshot = results_module._merge_partial_payload(kort_id, first)
+    results_module._process_snapshot(state, snapshot, now)
+
+    second = results_module._flatten_overlay_payload({"NamePlayerB": "B. Zielińska"})
+    snapshot = results_module._merge_partial_payload(kort_id, second)
+
+    for _ in range(results_module.NAME_STABILIZATION_TICKS):
+        now += 1.0
+        results_module._process_snapshot(state, snapshot, now)
+
+    assert snapshot["status"] == SNAPSHOT_STATUS_NO_DATA
+    assert state.phase is CourtPhase.PRE_START
+
+    schedule = state.command_schedules.get("GetPoints")
+    assert schedule is not None
+
+    initial_due = state.peek_next_due()
+    assert initial_due is not None
+
+    interval = schedule.spec.interval
+    commands: list[str] = []
+    current_snapshot = snapshot
+
+    for step in range(5):
+        tick_time = initial_due + step * interval + 0.001
+        spec = state.pop_due_command(tick_time)
+        assert spec == "GetPoints"
+        command = results_module._select_command(state, spec)
+        commands.append(command)
+
+        if command == "GetOverlayVisibility":
+            payload = {"OverlayVisibility": "on"}
+        elif command == "GetMode":
+            payload = {"Mode": "Match"}
+        elif command == "GetServe":
+            payload = {"ServePlayerA": 1}
+        elif command == "GetPointsPlayerA":
+            payload = {"PointsPlayerA": 30}
+        elif command == "GetPointsPlayerB":
+            payload = {"PointsPlayerB": 15}
+        else:
+            payload = {}
+
+        flattened = results_module._flatten_overlay_payload(payload)
+        current_snapshot = results_module._merge_partial_payload(kort_id, flattened)
+        results_module._process_snapshot(state, current_snapshot, tick_time)
+
+    assert "GetPointsPlayerA" in commands
+    assert "GetPointsPlayerB" in commands
+
+    assert current_snapshot["status"] == SNAPSHOT_STATUS_OK
+    assert current_snapshot["players"]["A"]["points"] == 30
+    assert current_snapshot["players"]["B"]["points"] == 15
+    assert state.phase is CourtPhase.LIVE_POINTS
 
 def test_archive_snapshot_capped_to_limit():
     kort_id = "archive-limit"
