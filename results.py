@@ -13,7 +13,12 @@ from urllib.parse import urlparse
 
 import requests
 
-from results_state_machine import CourtPhase, CourtState, ScoreSnapshot
+from results_state_machine import (
+    CourtPhase,
+    CourtPollingStage,
+    CourtState,
+    ScoreSnapshot,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -66,7 +71,7 @@ _PLAYER_FIELD_PATTERN = re.compile(
 )
 
 
-COMMAND_PLAN: Dict[CourtPhase, Dict[str, CommandPlanEntry]] = {
+COMMAND_PLAN_NORMAL: Dict[CourtPhase, Dict[str, CommandPlanEntry]] = {
     CourtPhase.IDLE_NAMES: {
         "GetNamePlayerA": {"commands": ("GetNamePlayerA",)},
         "GetNamePlayerB": {"commands": ("GetNamePlayerB",)},
@@ -152,6 +157,19 @@ COMMAND_PLAN: Dict[CourtPhase, Dict[str, CommandPlanEntry]] = {
         "GetNamePlayerA": {"commands": ("GetNamePlayerA",)},
         "GetNamePlayerB": {"commands": ("GetNamePlayerB",)},
     },
+}
+
+COMMAND_PLAN_OFF_STAGE: Dict[Optional[CourtPhase], Dict[str, CommandPlanEntry]] = {
+    None: {
+        "OffProbeAvailability": {"commands": ("GetOverlayVisibility",)},
+    }
+}
+
+COMMAND_PLAN: Dict[
+    CourtPollingStage, Dict[Optional[CourtPhase], Dict[str, CommandPlanEntry]]
+] = {
+    CourtPollingStage.NORMAL: COMMAND_PLAN_NORMAL,
+    CourtPollingStage.OFF: COMMAND_PLAN_OFF_STAGE,
 }
 
 snapshots_lock = threading.Lock()
@@ -600,8 +618,16 @@ def _order_players(players: tuple[str, ...], start: str) -> List[str]:
     return ordered
 
 
+def _resolve_command_plan(state: CourtState) -> Dict[str, CommandPlanEntry]:
+    stage_plan = COMMAND_PLAN.get(state.stage) or {}
+    plan = stage_plan.get(state.phase)
+    if plan is None:
+        plan = stage_plan.get(None, {})
+    return plan or {}
+
+
 def _select_command(state: CourtState, spec_name: str) -> Optional[str]:
-    plan = COMMAND_PLAN.get(state.phase) or {}
+    plan = _resolve_command_plan(state)
     entry = plan.get(spec_name)
     if not entry:
         return None
@@ -1480,9 +1506,12 @@ def _process_snapshot(state: CourtState, snapshot: Dict[str, Any], now: float) -
                 has_visibility_flag = True
                 break
 
-    if availability_value is False and has_visibility_flag:
-        state.apply_availability_pause(now, UNAVAILABLE_SLOW_POLL_SECONDS)
+    if availability_value is False:
+        if has_visibility_flag:
+            state.set_stage(CourtPollingStage.OFF, now)
+            state.apply_availability_pause(now, UNAVAILABLE_SLOW_POLL_SECONDS)
     elif availability_value is True:
+        state.set_stage(CourtPollingStage.NORMAL, now)
         state.clear_availability_pause()
 
 
