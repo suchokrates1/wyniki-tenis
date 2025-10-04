@@ -38,8 +38,8 @@ PER_CONTROLAPP_MIN_INTERVAL_SECONDS = 1.0
 GLOBAL_RATE_LIMIT_PER_SECOND = 4
 GLOBAL_RATE_WINDOW_SECONDS = 1.0
 MAX_RETRY_ATTEMPTS = 3
-RETRY_BASE_DELAY_SECONDS = 1.0
-RETRY_MAX_DELAY_SECONDS = 10.0
+RETRY_BASE_DELAY_SECONDS = 5.0
+RETRY_MAX_DELAY_SECONDS = 120.0
 RETRY_JITTER_MAX_SECONDS = 0.3
 
 COMMAND_ERROR_PAUSE_THRESHOLD = 3
@@ -309,6 +309,7 @@ def _format_rate_limit_headers(response: Optional[requests.Response]) -> str:
         ("X-RateLimit-Limit", "limit"),
         ("X-RateLimit-Reset", "reset"),
         ("Retry-After", "retry_after"),
+        ("X-Singular-RateLimit-Daily-Calls", "daily"),
     )
 
     parts: List[str] = []
@@ -453,26 +454,16 @@ def _parse_retry_after(response: requests.Response) -> Optional[float]:
         return max(0.0, delta)
 
 
-def _parse_rate_limit_reset(
-    response: requests.Response, *, reference_time: float
-) -> Optional[float]:
-    try:
-        header_value = response.headers.get("X-RateLimit-Reset")
-    except Exception:  # noqa: BLE001
-        return None
-
-    if not header_value:
-        return None
-
-    header_value = header_value.strip()
-    if not header_value:
+def _parse_reset_header_value(value: str, *, reference_time: float) -> Optional[float]:
+    value = (value or "").strip()
+    if not value:
         return None
 
     try:
-        numeric_value = float(header_value)
+        numeric_value = float(value)
     except ValueError:
         try:
-            reset_dt = parsedate_to_datetime(header_value)
+            reset_dt = parsedate_to_datetime(value)
         except (TypeError, ValueError):
             return None
         if reset_dt is None:
@@ -487,6 +478,65 @@ def _parse_rate_limit_reset(
         return reference_time + numeric_value
 
     return None
+
+
+def _parse_rate_limit_reset(
+    response: requests.Response, *, reference_time: float
+) -> Optional[float]:
+    try:
+        header_value = response.headers.get("X-RateLimit-Reset")
+    except Exception:  # noqa: BLE001
+        return None
+
+    if not header_value:
+        return None
+
+    return _parse_reset_header_value(str(header_value), reference_time=reference_time)
+
+
+def _parse_singular_daily_calls_header(
+    response: requests.Response, *, reference_time: float
+) -> Optional[Dict[str, Optional[float]]]:
+    try:
+        header_value = response.headers.get("X-Singular-RateLimit-Daily-Calls")
+    except Exception:  # noqa: BLE001
+        return None
+
+    if not header_value:
+        return None
+
+    items: Dict[str, str] = {}
+    for part in re.split(r"[;,]", str(header_value)):
+        if "=" not in part:
+            continue
+        key, value = part.split("=", 1)
+        key = key.strip().lower()
+        value = value.strip()
+        if not key:
+            continue
+        items[key] = value
+
+    if not items:
+        return None
+
+    def _parse_int(value: Optional[str]) -> Optional[int]:
+        if value is None:
+            return None
+        try:
+            return int(float(value))
+        except (TypeError, ValueError):
+            return None
+
+    limit = _parse_int(items.get("limit"))
+    remaining = _parse_int(items.get("remaining"))
+    reset_raw = items.get("reset")
+    reset_at = (
+        _parse_reset_header_value(reset_raw, reference_time=reference_time)
+        if reset_raw
+        else None
+    )
+
+    return {"limit": limit, "remaining": remaining, "reset": reset_at}
 
 
 def _calculate_retry_delay(attempt: int, response: Optional[requests.Response] = None) -> float:
@@ -1124,6 +1174,68 @@ def _merge_partial_payload(kort_id: str, partial: Dict[str, Any]) -> Dict[str, A
     return snapshot
 
 
+def _update_command_error_state(
+    state: CourtState,
+    *,
+    now: float,
+    spec_name: Optional[str] = None,
+) -> tuple[bool, bool]:
+    previous_pause_until = state.paused_until or 0.0
+    state.command_error_streak = min(state.command_error_streak + 1, 10_000)
+    if spec_name:
+        current = state.command_error_streak_by_spec.get(spec_name, 0) + 1
+        state.command_error_streak_by_spec[spec_name] = min(current, 10_000)
+
+    pause_active = False
+    new_pause_started = False
+    if state.command_error_streak >= COMMAND_ERROR_PAUSE_THRESHOLD:
+        pause_seconds = COMMAND_ERROR_PAUSE_MINUTES * 60
+        candidate_until = now + pause_seconds
+        if state.paused_until is None or candidate_until > state.paused_until:
+            state.paused_until = candidate_until
+        pause_active = state.paused_until is not None and state.paused_until > now
+        if pause_active and previous_pause_until <= now:
+            new_pause_started = True
+
+    return pause_active, new_pause_started
+
+
+def _update_snapshot_pause_state(
+    kort_id: str, state: CourtState, *, now: float
+) -> Dict[str, Any]:
+    entry = ensure_snapshot_entry(kort_id)
+    pause_until_iso = (
+        datetime.fromtimestamp(state.paused_until, timezone.utc).isoformat()
+        if state.paused_until is not None
+        else None
+    )
+    is_paused = state.paused_until is not None and state.paused_until > now
+
+    with snapshots_lock:
+        entry.setdefault("kort_id", str(kort_id))
+        if not isinstance(entry.get("players"), dict):
+            entry["players"] = entry.get("players") or {}
+        else:
+            entry.setdefault("players", {})
+        if not isinstance(entry.get("raw"), dict):
+            entry["raw"] = entry.get("raw") or {}
+        else:
+            entry.setdefault("raw", {})
+        entry.setdefault("archive", entry.get("archive", []))
+        entry.setdefault("status", entry.get("status", SNAPSHOT_STATUS_NO_DATA))
+        entry.setdefault("serving", entry.get("serving"))
+        entry.setdefault("available", entry.get("available", False))
+        entry.setdefault("badges", entry.get("badges", []))
+        entry.setdefault("error", entry.get("error"))
+        entry["pause_minutes"] = entry.get("pause_minutes") or COMMAND_ERROR_PAUSE_MINUTES
+        entry["pause_active"] = is_paused
+        entry["pause_until"] = pause_until_iso
+        entry["last_updated"] = _now_iso()
+        snapshot = copy.deepcopy(entry)
+
+    return snapshot
+
+
 def _handle_command_error(
     kort_id: str,
     error: str,
@@ -1138,21 +1250,11 @@ def _handle_command_error(
     if state is None:
         state = _ensure_court_state(kort_id)
 
-    previous_pause_until = state.paused_until or 0.0
-    state.command_error_streak = min(state.command_error_streak + 1, 10_000)
-    if spec_name:
-        current = state.command_error_streak_by_spec.get(spec_name, 0) + 1
-        state.command_error_streak_by_spec[spec_name] = min(current, 10_000)
+    pause_active, new_pause_started = _update_command_error_state(
+        state, now=now, spec_name=spec_name
+    )
 
-    pause_activated = False
-    if state.command_error_streak >= COMMAND_ERROR_PAUSE_THRESHOLD:
-        pause_seconds = COMMAND_ERROR_PAUSE_MINUTES * 60
-        candidate_until = now + pause_seconds
-        if state.paused_until is None or candidate_until > state.paused_until:
-            state.paused_until = candidate_until
-        pause_activated = state.paused_until is not None and state.paused_until > now
-
-    if pause_activated and previous_pause_until <= now:
+    if new_pause_started:
         logger.warning(
             "Kort %s przechodzi w pauzę na %s min po %s kolejnych błędach",
             kort_id,
@@ -1165,7 +1267,7 @@ def _handle_command_error(
         if state.paused_until is not None
         else None
     )
-    is_paused = state.paused_until is not None and state.paused_until > now
+    is_paused = pause_active
 
     entry = ensure_snapshot_entry(kort_id)
     with snapshots_lock:
@@ -1561,7 +1663,22 @@ def _update_once(
                     break
 
                 if response is not None:
+                    response_time = refresh_current_time()
+                    current_time = response_time
                     _record_response_event(status_code=status_code)
+                    daily_limits = _parse_singular_daily_calls_header(
+                        response, reference_time=response_time
+                    )
+                    if (
+                        daily_limits
+                        and daily_limits.get("remaining") is not None
+                        and daily_limits.get("remaining") <= 0
+                    ):
+                        reset_candidate = daily_limits.get("reset")
+                        if reset_candidate is not None:
+                            _schedule_controlapp_resume(
+                                controlapp_identifier, float(reset_candidate)
+                            )
                     if status_code == 404:
                         diagnostics = _format_http_error_details(command, response)
                         cooldown_until = current_time + NOT_FOUND_COOLDOWN_SECONDS
@@ -1636,7 +1753,6 @@ def _update_once(
                         except Exception:  # noqa: BLE001
                             pass
 
-                        current_time = refresh_current_time()
                         retry_after_seconds = _parse_retry_after(response)
                         reset_timestamp = _parse_rate_limit_reset(
                             response, reference_time=current_time
@@ -1672,6 +1788,19 @@ def _update_once(
                             reset_header or "brak",
                             reset_iso,
                             rate_limits_desc,
+                        )
+                        _pause_active, new_pause_started = _update_command_error_state(
+                            state, now=current_time, spec_name=spec_name
+                        )
+                        if new_pause_started:
+                            logger.warning(
+                                "Kort %s przechodzi w pauzę na %s min po %s kolejnych błędach",
+                                kort_id,
+                                COMMAND_ERROR_PAUSE_MINUTES,
+                                state.command_error_streak,
+                            )
+                        _update_snapshot_pause_state(
+                            kort_id, state, now=current_time
                         )
                         break
 
