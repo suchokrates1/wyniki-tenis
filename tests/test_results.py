@@ -47,7 +47,7 @@ def setup_function(function):
 
 # --- Testy widoku /wyniki -----------------------------------------------------
 
-def test_results_page_renders_data(client, snapshots_dir):
+def test_results_page_renders_data(client, snapshot_injector):
     sample_data = [
         {
             "kort_id": "1",
@@ -74,7 +74,8 @@ def test_results_page_renders_data(client, snapshots_dir):
             "game_score": "6-3, 6-3",
         },
     ]
-    (snapshots_dir / "latest.json").write_text(json.dumps(sample_data), encoding="utf-8")
+
+    snapshot_injector({entry["kort_id"]: entry for entry in sample_data})
 
     response = client.get("/wyniki")
     html = response.get_data(as_text=True)
@@ -98,7 +99,7 @@ def test_results_page_shows_placeholder_for_finished_section(client, snapshots_d
     assert "Aktualne spotkania i status kortów" in html
 
 
-def test_results_page_marks_unavailable_with_notice(client, snapshots_dir):
+def test_results_page_marks_unavailable_with_notice(client, snapshot_injector):
     sample_data = [
         {
             "kort_id": "3",
@@ -111,7 +112,8 @@ def test_results_page_marks_unavailable_with_notice(client, snapshots_dir):
             ],
         }
     ]
-    (snapshots_dir / "latest.json").write_text(json.dumps(sample_data), encoding="utf-8")
+
+    snapshot_injector({entry["kort_id"]: entry for entry in sample_data})
 
     response = client.get("/wyniki")
     html = response.get_data(as_text=True)

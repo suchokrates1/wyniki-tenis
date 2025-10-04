@@ -1,8 +1,11 @@
 import base64
 
+import copy
+
 import pytest
 
 from main import app, db
+import results
 
 
 @pytest.fixture
@@ -30,6 +33,8 @@ def restore_config_file(tmp_path):
     with app.app_context():
         db.session.remove()
         db.engine.dispose()
+        if database_path.exists():
+            database_path.unlink()
         db.drop_all()
         db.create_all()
 
@@ -39,3 +44,27 @@ def restore_config_file(tmp_path):
         db.session.remove()
         db.drop_all()
         db.engine.dispose()
+
+
+@pytest.fixture
+def snapshot_injector():
+    def apply(entries: dict[str, dict] | list[dict], *, clear: bool = True) -> None:
+        if isinstance(entries, list):
+            mapping: dict[str, dict] = {}
+            for entry in entries:
+                kort_id = entry.get("kort_id")
+                if kort_id is None:
+                    continue
+                mapping[str(kort_id)] = copy.deepcopy(entry)
+        else:
+            mapping = {str(key): copy.deepcopy(value) for key, value in entries.items()}
+
+        with results.snapshots_lock:
+            if clear:
+                results.snapshots.clear()
+            results.snapshots.update(mapping)
+
+    yield apply
+
+    with results.snapshots_lock:
+        results.snapshots.clear()

@@ -162,6 +162,13 @@ states_lock = threading.Lock()
 metrics_lock = threading.Lock()
 
 
+def get_all_snapshots() -> Dict[str, Dict[str, Any]]:
+    """Return a deep copy of all current snapshots under a thread lock."""
+
+    with snapshots_lock:
+        return copy.deepcopy(snapshots)
+
+
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
@@ -1605,6 +1612,7 @@ __all__ = [
     "SNAPSHOT_STATUS_UNAVAILABLE",
     "build_output_url",
     "ensure_snapshot_entry",
+    "get_all_snapshots",
     "get_metrics_snapshot",
     "parse_overlay_json",
     "reset_metrics",
