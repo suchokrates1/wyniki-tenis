@@ -71,6 +71,7 @@ COMMAND_PLAN: Dict[CourtPhase, Dict[str, CommandPlanEntry]] = {
     CourtPhase.IDLE_NAMES: {
         "GetNamePlayerA": {"commands": ("GetNamePlayerA",)},
         "GetNamePlayerB": {"commands": ("GetNamePlayerB",)},
+        "ProbeAvailability": {"commands": ("GetOverlayVisibility",)},
     },
     CourtPhase.PRE_START: {
         "GetPoints": {
