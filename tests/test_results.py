@@ -368,7 +368,7 @@ def test_merge_partial_payload_single_player_payload_sets_partial_status():
     assert snapshot["status"] == SNAPSHOT_STATUS_PARTIAL
 
 
-def test_merge_partial_payload_name_only_updates_set_partial_status():
+def test_merge_partial_payload_name_only_updates_set_ok_status():
     kort_id = "name-only"
 
     first = results_module._flatten_overlay_payload({"NamePlayerA": "A. Kowalski"})
@@ -379,7 +379,7 @@ def test_merge_partial_payload_name_only_updates_set_partial_status():
     second = results_module._flatten_overlay_payload({"NamePlayerB": "B. Zielińska"})
     snapshot = results_module._merge_partial_payload(kort_id, second)
 
-    assert snapshot["status"] == SNAPSHOT_STATUS_PARTIAL
+    assert snapshot["status"] == SNAPSHOT_STATUS_OK
 
 
 def test_merge_partial_payload_preserves_existing_name_on_blank_update():
@@ -414,7 +414,7 @@ def test_partial_updates_allow_state_progression():
         now += 1
         results_module._process_snapshot(state, snapshot, now)
 
-    assert snapshot["status"] == SNAPSHOT_STATUS_PARTIAL
+    assert snapshot["status"] == SNAPSHOT_STATUS_OK
     assert state.phase is CourtPhase.PRE_START
 
     third = results_module._flatten_overlay_payload(
@@ -505,7 +505,7 @@ def test_name_stabilization_triggers_points_schedule_and_snapshot_completion():
         now += 1.0
         results_module._process_snapshot(state, snapshot, now)
 
-    assert snapshot["status"] == SNAPSHOT_STATUS_PARTIAL
+    assert snapshot["status"] == SNAPSHOT_STATUS_OK
     assert state.phase is CourtPhase.PRE_START
 
     schedule = state.command_schedules.get("GetPoints")
