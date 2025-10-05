@@ -1443,29 +1443,18 @@ def _process_snapshot(state: CourtState, snapshot: Dict[str, Any], now: float) -
     # Harmonogram komend aktualizowany jest w CourtState podczas przejść
 
     availability_value = snapshot.get("available")
-    raw_payload = snapshot.get("raw")
-    has_visibility_flag = False
-    if isinstance(raw_payload, dict):
-        for key in raw_payload.keys():
-            key_text = str(key).lower()
-            if "overlayvisibility" in key_text or key_text == "overlayvisible":
-                has_visibility_flag = True
-                break
+    previous_stage = state.stage
 
     if availability_value is False:
-        if has_visibility_flag:
-            previous_stage = state.stage
-            state.set_stage(CourtPollingStage.OFF, now)
-            state.apply_availability_pause(now, UNAVAILABLE_SLOW_POLL_SECONDS)
-            if state.stage is not previous_stage:
-                _update_snapshot_stage_metadata(state.kort_id, state)
+        state.set_stage(CourtPollingStage.OFF, now)
+        state.apply_availability_pause(now, UNAVAILABLE_SLOW_POLL_SECONDS)
     elif availability_value is True:
         if state.stage is not CourtPollingStage.OFF_UNTIL_RESET:
-            previous_stage = state.stage
             state.set_stage(CourtPollingStage.NORMAL, now)
             state.clear_availability_pause()
-            if state.stage is not previous_stage:
-                _update_snapshot_stage_metadata(state.kort_id, state)
+
+    if state.stage is not previous_stage:
+        _update_snapshot_stage_metadata(state.kort_id, state)
 
 
 def update_snapshot_for_kort(
@@ -1700,160 +1689,6 @@ def _map_command_response(command: str, payload: Dict[str, Any]) -> Dict[str, An
         mapped.setdefault("TieBreakVisibility", mapped.get("TieBreakVisibility"))
 
     return mapped
-
-
-def _classify_phase(
-    snapshot: Dict[str, Any], state: CourtState, score: ScoreSnapshot
-) -> CourtPhase:
-    name_signature = state.compute_name_signature(snapshot)
-    has_any_name = any(part.strip() for part in name_signature.split("|"))
-
-    status = snapshot.get("status")
-
-    if status == SNAPSHOT_STATUS_UNAVAILABLE:
-        return CourtPhase.IDLE_NAMES
-
-    if not has_any_name:
-        return CourtPhase.IDLE_NAMES
-
-    if (
-        state.phase is CourtPhase.IDLE_NAMES
-        and NAME_STABILIZATION_TICKS > 0
-        and state.name_stability < NAME_STABILIZATION_TICKS
-    ):
-        return CourtPhase.IDLE_NAMES
-
-    if (
-        state.name_stability < NAME_STABILIZATION_TICKS
-        and not score.points_any
-        and not score.games_any
-        and not score.sets_present
-    ):
-        return CourtPhase.IDLE_NAMES
-
-    sets_won_a, sets_won_b = score.sets_won
-    finished_sets = score.sets_completed >= 1 and (
-        max(sets_won_a, sets_won_b) >= 2 or score.sets_completed >= 3
-    )
-    if finished_sets and state.points_absent_streak >= 2:
-        return CourtPhase.FINISHED
-
-    if score.super_tb_active:
-        return CourtPhase.SUPER_TB10
-
-    if score.tie_break_active:
-        return CourtPhase.TIEBREAK7
-
-    if score.sets_present and score.sets_completed > 0:
-        return CourtPhase.LIVE_SETS
-
-    if score.games_positive:
-        return CourtPhase.LIVE_GAMES
-
-    if state.points_positive_streak >= 2:
-        return CourtPhase.LIVE_POINTS
-
-    if score.points_any or score.games_any or score.sets_present:
-        return CourtPhase.PRE_START
-
-    return CourtPhase.PRE_START
-
-
-def _process_snapshot(state: CourtState, snapshot: Dict[str, Any], now: float) -> None:
-    state.mark_polled(now)
-    name_signature = state.compute_name_signature(snapshot)
-    state.update_name_stability(
-        name_signature, required_ticks=NAME_STABILIZATION_TICKS
-    )
-    score_snapshot = state.compute_score_snapshot(snapshot)
-    state.update_score_stability(score_snapshot)
-    desired_phase = _classify_phase(snapshot, state, score_snapshot)
-    raw_signature = state.compute_raw_signature(snapshot)
-
-    if (
-        state.phase is CourtPhase.FINISHED
-        and desired_phase is CourtPhase.FINISHED
-        and state.finished_name_signature
-        and name_signature != state.finished_name_signature
-    ):
-        state.transition(CourtPhase.IDLE_NAMES, now)
-        return
-
-    if (
-        state.phase is CourtPhase.FINISHED
-        and desired_phase is CourtPhase.FINISHED
-        and state.finished_raw_signature
-        and raw_signature != state.finished_raw_signature
-    ):
-        state.transition(CourtPhase.IDLE_NAMES, now)
-        return
-
-    previous_phase = state.phase
-    state.transition(desired_phase, now)
-
-    if state.phase is CourtPhase.FINISHED:
-        if previous_phase is not CourtPhase.FINISHED:
-            _archive_snapshot(state.kort_id, snapshot)
-        state.finished_name_signature = name_signature
-        state.finished_raw_signature = raw_signature
-    else:
-        state.finished_name_signature = None
-        state.finished_raw_signature = None
-
-    # Harmonogram komend aktualizowany jest w CourtState podczas przejść
-
-    availability_value = snapshot.get("available")
-    raw_payload = snapshot.get("raw")
-    has_visibility_flag = False
-    if isinstance(raw_payload, dict):
-        for key in raw_payload.keys():
-            key_text = str(key).lower()
-            if "overlayvisibility" in key_text or key_text == "overlayvisible":
-                has_visibility_flag = True
-                break
-
-    if availability_value is False:
-        if has_visibility_flag:
-            state.set_stage(CourtPollingStage.OFF, now)
-            state.apply_availability_pause(now, UNAVAILABLE_SLOW_POLL_SECONDS)
-    elif availability_value is True:
-        state.set_stage(CourtPollingStage.NORMAL, now)
-        state.clear_availability_pause()
-
-
-def update_snapshot_for_kort(
-    kort_id: str,
-    control_url: str,
-    *,
-    session: Optional[requests.sessions.Session] = None,
-) -> Dict[str, Any]:
-    entry = ensure_snapshot_entry(kort_id)
-    with snapshots_lock:
-        snapshot = copy.deepcopy(entry)
-    return snapshot
-
-
-def _mark_unavailable(kort_id: str, *, error: Optional[str]) -> Dict[str, Any]:
-    payload = {
-        "kort_id": str(kort_id),
-        "status": SNAPSHOT_STATUS_UNAVAILABLE,
-        "last_updated": _now_iso(),
-        "players": {},
-        "raw": {},
-        "serving": None,
-        "error": error,
-        "available": False,
-        "pause_minutes": COMMAND_ERROR_PAUSE_MINUTES,
-        "pause_active": False,
-        "pause_until": None,
-    }
-    entry = ensure_snapshot_entry(kort_id)
-    with snapshots_lock:
-        archive = entry.get("archive", [])
-        entry.update(payload)
-        entry["archive"] = archive
-        payload = copy.deepcopy(entry)
-    return payload
 
 
 _thread: Optional[threading.Thread] = None
