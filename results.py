@@ -1357,13 +1357,6 @@ def _classify_phase(
         return CourtPhase.IDLE_NAMES
 
     if (
-        state.phase is CourtPhase.IDLE_NAMES
-        and NAME_STABILIZATION_TICKS > 0
-        and state.name_stability < NAME_STABILIZATION_TICKS
-    ):
-        return CourtPhase.IDLE_NAMES
-
-    if (
         state.name_stability < NAME_STABILIZATION_TICKS
         and not score.points_any
         and not score.games_any
