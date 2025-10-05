@@ -368,6 +368,20 @@ def test_merge_partial_payload_name_only_updates_set_partial_status():
     assert snapshot["status"] == SNAPSHOT_STATUS_PARTIAL
 
 
+def test_merge_partial_payload_preserves_existing_name_on_blank_update():
+    kort_id = "blank-name"
+
+    initial = results_module._flatten_overlay_payload({"NamePlayerA": "A. Kowalski"})
+    snapshot = results_module._merge_partial_payload(kort_id, initial)
+
+    assert snapshot["players"]["A"]["name"] == "A. Kowalski"
+
+    blank = results_module._flatten_overlay_payload({"NamePlayerA": "   "})
+    snapshot = results_module._merge_partial_payload(kort_id, blank)
+
+    assert snapshot["players"]["A"]["name"] == "A. Kowalski"
+
+
 def test_partial_updates_allow_state_progression():
     kort_id = "2"
     state = results_module._ensure_court_state(kort_id)
