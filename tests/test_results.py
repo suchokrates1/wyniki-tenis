@@ -618,6 +618,38 @@ def test_off_stage_limits_requests_per_minute():
     assert all(name == "OffProbeAvailability" for _, name in state.command_history)
 
 
+def test_available_false_snapshot_without_overlay_enters_off_stage():
+    kort_id = "off-stage-no-overlay"
+    state = results_module._ensure_court_state(kort_id)
+    results_module.ensure_snapshot_entry(kort_id)
+
+    now = 120.0
+    snapshot = {
+        "kort_id": kort_id,
+        "status": SNAPSHOT_STATUS_UNAVAILABLE,
+        "last_updated": results_module._now_iso(),
+        "players": {},
+        "raw": {},
+        "serving": None,
+        "error": None,
+        "available": False,
+        "pause_minutes": results_module.COMMAND_ERROR_PAUSE_MINUTES,
+        "pause_active": False,
+        "pause_until": None,
+    }
+
+    results_module._process_snapshot(state, snapshot, now)
+
+    assert state.stage is CourtPollingStage.OFF
+    assert state.availability_paused_until == pytest.approx(
+        now + results_module.UNAVAILABLE_SLOW_POLL_SECONDS
+    )
+
+    schedule = state.command_schedules.get("OffProbeAvailability")
+    assert schedule is not None
+    assert schedule.spec.interval >= results_module.UNAVAILABLE_SLOW_POLL_SECONDS
+
+
 def test_off_stage_restores_full_plan_when_available_returns():
     kort_id = "off-stage-recovery"
     state = results_module._ensure_court_state(kort_id)
