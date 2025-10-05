@@ -157,11 +157,12 @@ STATUS_LABELS = {
     "disabled": "Wyłączony",
     "unavailable": "Niedostępny",
     "brak_danych": "Brak danych",
+    "partial": "Niepełne dane",
 }
 
 UNAVAILABLE_STATUSES = {"unavailable", "niedostępny", "niedostepny"}
 NO_DATA_STATUSES = {"brak danych", "brak_danych", "no data", "no_data"}
-STATUS_ORDER = ["active", "finished", "disabled", "unavailable", "brak_danych"]
+STATUS_ORDER = ["active", "finished", "disabled", "unavailable", "partial", "brak_danych"]
 STATUS_VIEW_META = {
     "active": {
         "title": "Aktywne mecze",
@@ -182,6 +183,11 @@ STATUS_VIEW_META = {
         "title": "Korty niedostępne",
         "caption": "Ostatnio obserwowane korty bez dostępu",
         "empty_message": "Wszystkie korty są obecnie dostępne.",
+    },
+    "partial": {
+        "title": "Korty z niepełnymi danymi",
+        "caption": "Korty z częściowymi aktualizacjami (np. tylko nazwiska)",
+        "empty_message": "Brak kortów z niepełnymi danymi.",
     },
     "brak_danych": {
         "title": "Korty bez danych",
@@ -588,7 +594,9 @@ def normalize_status(raw_status, available, has_snapshot):
     if status_text in NO_DATA_STATUSES:
         return "brak_danych"
 
-    if status_text in FINISHED_STATUSES:
+    if status_text == "partial":
+        base_status = "partial"
+    elif status_text in FINISHED_STATUSES:
         base_status = "finished"
     elif status_text in ACTIVE_STATUSES or status_text == "ok":
         base_status = "active"
@@ -597,7 +605,7 @@ def normalize_status(raw_status, available, has_snapshot):
     else:
         base_status = "active"
 
-    if not available and base_status != "brak_danych":
+    if not available and base_status not in {"brak_danych", "partial"}:
         return "unavailable"
 
     return base_status

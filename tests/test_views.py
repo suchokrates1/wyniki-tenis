@@ -75,6 +75,22 @@ def test_wyniki_view_localizes_last_updated(client, monkeypatch, snapshot_inject
     assert 'title="2024-07-01T14:32:00Z"' in html
 
 
+def test_normalize_snapshot_entry_partial_status_label():
+    snapshot = {
+        "status": results.SNAPSHOT_STATUS_PARTIAL,
+        "available": True,
+        "players": [
+            {"name": "A. Kowalski"},
+            {"name": "B. Zielińska"},
+        ],
+    }
+
+    normalized = main.normalize_snapshot_entry("1", snapshot, {})
+
+    assert normalized["status"] == "partial"
+    assert normalized["status_label"] == main.STATUS_LABELS["partial"]
+
+
 def test_wyniki_hides_hidden_and_marks_disabled(client):
     with flask_app.app_context():
         main.ensure_overlay_links_seeded()

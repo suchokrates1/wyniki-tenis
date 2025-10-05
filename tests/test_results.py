@@ -20,6 +20,7 @@ import results_state_machine
 from results import (
     SNAPSHOT_STATUS_NO_DATA,
     SNAPSHOT_STATUS_OK,
+    SNAPSHOT_STATUS_PARTIAL,
     SNAPSHOT_STATUS_UNAVAILABLE,
     build_output_url,
     snapshots,
@@ -287,7 +288,7 @@ def test_merge_partial_payload_maps_single_player_fields():
 
     snapshot = results_module._merge_partial_payload(kort_id, flattened)
 
-    assert snapshot["status"] == SNAPSHOT_STATUS_NO_DATA
+    assert snapshot["status"] == SNAPSHOT_STATUS_PARTIAL
     assert snapshot["raw"].get("PlayerA", {}).get("Name") == "A. Nowak"
     assert snapshot["players"]["A"]["name"] == "A. Nowak"
     assert "B" not in snapshot["players"]
@@ -342,7 +343,7 @@ def test_merge_partial_payload_defaults_available_to_false():
     assert snapshot["available"] is False
 
 
-def test_merge_partial_payload_single_player_payload_does_not_set_ok():
+def test_merge_partial_payload_single_player_payload_sets_partial_status():
     kort_id = "single-player"
     first = results_module._flatten_overlay_payload(
         {"NamePlayerA": "A. Kowalski", "PointsPlayerA": 15}
@@ -350,21 +351,21 @@ def test_merge_partial_payload_single_player_payload_does_not_set_ok():
 
     snapshot = results_module._merge_partial_payload(kort_id, first)
 
-    assert snapshot["status"] == SNAPSHOT_STATUS_NO_DATA
+    assert snapshot["status"] == SNAPSHOT_STATUS_PARTIAL
 
 
-def test_merge_partial_payload_name_only_updates_keep_status_no_data():
+def test_merge_partial_payload_name_only_updates_set_partial_status():
     kort_id = "name-only"
 
     first = results_module._flatten_overlay_payload({"NamePlayerA": "A. Kowalski"})
     snapshot = results_module._merge_partial_payload(kort_id, first)
 
-    assert snapshot["status"] == SNAPSHOT_STATUS_NO_DATA
+    assert snapshot["status"] == SNAPSHOT_STATUS_PARTIAL
 
     second = results_module._flatten_overlay_payload({"NamePlayerB": "B. Zielińska"})
     snapshot = results_module._merge_partial_payload(kort_id, second)
 
-    assert snapshot["status"] == SNAPSHOT_STATUS_NO_DATA
+    assert snapshot["status"] == SNAPSHOT_STATUS_PARTIAL
 
 
 def test_partial_updates_allow_state_progression():
@@ -385,7 +386,7 @@ def test_partial_updates_allow_state_progression():
         now += 1
         results_module._process_snapshot(state, snapshot, now)
 
-    assert snapshot["status"] == SNAPSHOT_STATUS_NO_DATA
+    assert snapshot["status"] == SNAPSHOT_STATUS_PARTIAL
     assert state.phase is CourtPhase.PRE_START
 
     third = results_module._flatten_overlay_payload(
@@ -451,7 +452,7 @@ def test_name_stabilization_triggers_points_schedule_and_snapshot_completion():
         now += 1.0
         results_module._process_snapshot(state, snapshot, now)
 
-    assert snapshot["status"] == SNAPSHOT_STATUS_NO_DATA
+    assert snapshot["status"] == SNAPSHOT_STATUS_PARTIAL
     assert state.phase is CourtPhase.PRE_START
 
     schedule = state.command_schedules.get("GetPoints")
