@@ -23,6 +23,7 @@ from results import (
     SNAPSHOT_STATUS_PARTIAL,
     SNAPSHOT_STATUS_UNAVAILABLE,
     build_output_url,
+    ensure_snapshot_entry,
     snapshots,
     update_snapshot_for_kort,
 )
@@ -972,6 +973,7 @@ def test_update_once_cycles_commands_and_transitions(monkeypatch):
         else:
             template = reset_snapshot
         snapshot = copy.deepcopy(template)
+        snapshot["available"] = True
         entry = results_module.ensure_snapshot_entry(kort_id)
         with results_module.snapshots_lock:
             archive = entry.get("archive", [])
@@ -1322,7 +1324,7 @@ def test_update_once_logs_successful_payload(monkeypatch, caplog):
     ]
     assert success_logs, f"Brak logów sukcesu w caplog: {caplog.text}"
     message = success_logs[0].getMessage()
-    assert "GetNamePlayer" in message
+    assert "GetOverlayVisibility" in message
     assert "PointsPlayerA" in message
     assert "***" in message  # maskowanie wrażliwych danych
     assert "super-secret-token" not in message
@@ -1685,6 +1687,7 @@ def test_token_bucket_limits_requests_across_courts(monkeypatch):
     base_payload = {
         "PlayerA": {"value": "Player One"},
         "PlayerB": {"value": "Player Two"},
+        "OverlayVisibility": {"value": "on"},
     }
 
     class TimedSession(DummySession):
@@ -1888,6 +1891,7 @@ def test_update_once_switches_polling_when_overlay_unavailable(monkeypatch):
 
     state = results_module.court_states["1"]
     assert len(session.requests) == 1
+    assert session.requests[0]["json"] == {"command": "GetOverlayVisibility"}
     assert state.availability_paused_until is not None
     assert state.availability_paused_until == pytest.approx(
         start + results_module.UNAVAILABLE_SLOW_POLL_SECONDS, rel=1e-6
@@ -1904,8 +1908,53 @@ def test_update_once_switches_polling_when_overlay_unavailable(monkeypatch):
     results_module._update_once(app, supplier, session=session, now=fake_time.time())
 
     assert len(session.requests) == 2
+    assert session.requests[1]["json"] == {"command": "GetOverlayVisibility"}
     assert state.availability_paused_until is None
     assert not state.is_paused(fake_time.current)
+
+
+def test_update_once_forces_visibility_probe_when_availability_unknown(monkeypatch):
+    snapshots.clear()
+    results_module.court_states.clear()
+
+    overlay_links = {
+        "1": {"control": "https://app.overlays.uno/control/idle-probe"}
+    }
+
+    def supplier():
+        return overlay_links
+
+    session = SequenceSession(
+        [DummyResponse({"OverlayVisibility": "on"}, status_code=200)]
+    )
+
+    fake_time = TimeController(start=0.0)
+    monkeypatch.setattr(results_module.time, "time", fake_time.time)
+    monkeypatch.setattr(results_module.time, "sleep", fake_time.sleep)
+    monkeypatch.setattr(results_module.random, "uniform", lambda *_: 0.0)
+    monkeypatch.setattr(results_state_machine, "_default_offset", lambda *_: 0.0)
+
+    state = results_module._ensure_court_state("1")
+    state.phase_offset = 0.0
+    state._configure_phase_commands(now=fake_time.time())
+
+    ensure_snapshot_entry("1")
+
+    name_a_schedule = state.command_schedules["GetNamePlayerA"]
+    name_a_schedule.next_due = fake_time.time()
+
+    name_b_schedule = state.command_schedules["GetNamePlayerB"]
+    name_b_schedule.next_due = fake_time.time() + 120.0
+
+    probe_schedule = state.command_schedules["ProbeAvailability"]
+    probe_schedule.next_due = fake_time.time() + 120.0
+
+    results_module._update_once(
+        app, supplier, session=session, now=fake_time.time()
+    )
+
+    assert len(session.requests) == 1
+    assert session.requests[0]["json"] == {"command": "GetOverlayVisibility"}
 
 
 def test_idle_names_overlay_probe_limits_request_frequency(monkeypatch):
@@ -2001,8 +2050,8 @@ def test_update_once_logs_details_on_retry_exhaustion(monkeypatch, caplog):
     message = warning_messages[-1]
 
     assert "kortu 1" in message
-    assert "GetNamePlayerA" in message
-    assert 'payload={"command": "GetNamePlayerA"}' in message
+    assert "GetOverlayVisibility" in message
+    assert 'payload={"command": "GetOverlayVisibility"}' in message
     assert "po 2 próbach" in message
     assert "HTTP 500" in message
 
