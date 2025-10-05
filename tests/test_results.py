@@ -533,6 +533,29 @@ def test_idle_names_probe_runs_before_names_when_overlay_unknown():
     assert state.command_history[-1][1] == "ProbeAvailability"
 
 
+def test_stage_reverting_to_normal_clears_pending_command_queue():
+    kort_id = "stage-reset"
+    state = results_module._ensure_court_state(kort_id)
+    state.phase_offset = 0.0
+    state._configure_phase_commands(now=0.0)
+    state.transition(CourtPhase.LIVE_POINTS, now=0.0)
+
+    spec_name = "GetPoints"
+    command = results_module._select_command(state, spec_name)
+    assert command is not None
+    assert spec_name in state.pending_players_by_spec
+    assert spec_name in state.next_player_by_spec
+
+    state.set_stage(CourtPollingStage.OFF, now=1.0)
+    assert spec_name in state.pending_players_by_spec
+    assert spec_name in state.next_player_by_spec
+
+    state.set_stage(CourtPollingStage.NORMAL, now=2.0)
+
+    assert state.pending_players_by_spec == {}
+    assert state.next_player_by_spec == {}
+
+
 def test_off_stage_limits_requests_per_minute():
     kort_id = "off-stage-limit"
     state = results_module._ensure_court_state(kort_id)
@@ -1463,13 +1486,45 @@ def test_update_once_honours_daily_limit_header(monkeypatch):
     assert cooldown is not None
     assert cooldown == pytest.approx(400.0, rel=1e-6)
 
+    state = results_module.court_states["1"]
+    assert state.stage is CourtPollingStage.OFF_UNTIL_RESET
+    assert state.availability_paused_until == pytest.approx(400.0, rel=1e-6)
+
+    snapshot_entry = snapshots["1"]
+    assert snapshot_entry["polling_stage"] == CourtPollingStage.OFF_UNTIL_RESET.value
+    expected_iso = datetime.fromtimestamp(400.0, timezone.utc).isoformat()
+    assert snapshot_entry["wait_reset_until"] == expected_iso
+    assert any(
+        badge.get("label") == "WAIT-RESET" for badge in snapshot_entry.get("badges", [])
+    )
+
+    normalized = normalize_snapshot_entry("1", snapshot_entry, overlay_links["1"])
+    assert normalized["overlay_label"] == "WAIT-RESET"
+    assert normalized["overlay_is_on"] is False
+    assert any(badge["label"] == "WAIT-RESET" for badge in normalized["badges"])
+
     fake_time.current = 350.0
     results_module._update_once(app, supplier, session=session, now=fake_time.time())
     assert len(session.requests) == 1
+    state = results_module.court_states["1"]
+    assert state.stage is CourtPollingStage.OFF_UNTIL_RESET
 
     fake_time.current = 401.0
     results_module._update_once(app, supplier, session=session, now=fake_time.time())
     assert len(session.requests) == 2
+
+    state = results_module.court_states["1"]
+    assert state.stage is CourtPollingStage.NORMAL
+
+    resumed_snapshot = snapshots["1"]
+    assert resumed_snapshot["polling_stage"] == CourtPollingStage.NORMAL.value
+    assert resumed_snapshot.get("wait_reset_until") in {None, ""}
+    assert not any(
+        badge.get("label") == "WAIT-RESET" for badge in resumed_snapshot.get("badges", [])
+    )
+
+    normalized_after = normalize_snapshot_entry("1", resumed_snapshot, overlay_links["1"])
+    assert normalized_after["overlay_label"] != "WAIT-RESET"
 
 
 def test_update_once_applies_pause_after_consecutive_429(monkeypatch):

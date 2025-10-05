@@ -30,6 +30,7 @@ from results import (
     snapshots,
     start_background_updater,
 )
+from results_state_machine import CourtPollingStage
 
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -793,8 +794,16 @@ def normalize_snapshot_entry(kort_id, snapshot, link_meta=None):
 
     status_label = STATUS_LABELS.get(status, status.replace("_", " ").capitalize())
 
+    stage_value = str(
+        snapshot.get("polling_stage")
+        if has_snapshot
+        else CourtPollingStage.NORMAL.value
+    )
     overlay_is_on = bool(available)
     overlay_label = "ON" if overlay_is_on else "OFF"
+    if stage_value == CourtPollingStage.OFF_UNTIL_RESET.value:
+        overlay_is_on = False
+        overlay_label = "WAIT-RESET"
     last_updated_display, last_updated_iso = normalize_last_updated(
         snapshot.get("last_updated")
         or snapshot.get("updated_at")
@@ -867,6 +876,7 @@ def normalize_snapshot_entry(kort_id, snapshot, link_meta=None):
         "enabled": link_enabled,
         "hidden": link_hidden,
         "has_snapshot": has_snapshot,
+        "polling_stage": stage_value,
         "overlay_is_on": overlay_is_on,
         "overlay_label": overlay_label,
         "last_updated": last_updated_display,

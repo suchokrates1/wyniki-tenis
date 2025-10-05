@@ -27,6 +27,7 @@ class CourtPollingStage(enum.Enum):
 
     NORMAL = "normal"
     OFF = "off"
+    OFF_UNTIL_RESET = "off_until_reset"
 
 
 def _default_offset(kort_id: str) -> float:
@@ -194,6 +195,7 @@ _COMMAND_SPECS: Dict[
 ] = {
     CourtPollingStage.NORMAL: _NORMAL_COMMAND_SPECS,
     CourtPollingStage.OFF: _OFF_STAGE_COMMAND_SPECS,
+    CourtPollingStage.OFF_UNTIL_RESET: {},
 }
 
 
@@ -271,6 +273,9 @@ class CourtState:
             return
         self.stage = stage
         self.stage_started_at = now
+        if stage is CourtPollingStage.NORMAL:
+            self.pending_players_by_spec.clear()
+            self.next_player_by_spec.clear()
         self._configure_phase_commands(now)
 
     def compute_name_signature(self, snapshot: Dict[str, object]) -> str:
