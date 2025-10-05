@@ -26,6 +26,7 @@ logger = logging.getLogger(__name__)
 SNAPSHOT_STATUS_NO_DATA = "brak danych"
 SNAPSHOT_STATUS_UNAVAILABLE = "niedostępny"
 SNAPSHOT_STATUS_OK = "ok"
+SNAPSHOT_STATUS_PARTIAL = "partial"
 
 _SENSITIVE_FIELD_MARKERS = (
     "token",
@@ -1124,8 +1125,23 @@ def _merge_partial_payload(kort_id: str, partial: Dict[str, Any]) -> Dict[str, A
             return has_points or has_sets
 
         entry["status"] = SNAPSHOT_STATUS_NO_DATA
-        if all(_player_has_payload(merged_players.get(suffix)) for suffix in ("A", "B")):
+
+        has_complete_payload = all(
+            _player_has_payload(merged_players.get(suffix)) for suffix in ("A", "B")
+        )
+
+        def _player_has_name(player_info: Any) -> bool:
+            if not isinstance(player_info, dict):
+                return False
+            name_value = player_info.get("name")
+            if isinstance(name_value, str):
+                return bool(name_value.strip())
+            return name_value not in (None, "")
+
+        if has_complete_payload:
             entry["status"] = SNAPSHOT_STATUS_OK
+        elif any(_player_has_name(merged_players.get(suffix)) for suffix in ("A", "B")):
+            entry["status"] = SNAPSHOT_STATUS_PARTIAL
 
         _apply_stage_metadata(entry, _ensure_court_state(kort_id))
         snapshots[str(kort_id)] = entry
@@ -2308,6 +2324,7 @@ __all__ = [
     "SNAPSHOT_STATUS_NO_DATA",
     "SNAPSHOT_STATUS_OK",
     "SNAPSHOT_STATUS_UNAVAILABLE",
+    "SNAPSHOT_STATUS_PARTIAL",
     "build_output_url",
     "ensure_snapshot_entry",
     "get_all_snapshots",
