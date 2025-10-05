@@ -1,4 +1,5 @@
 import copy
+import os
 import json
 import logging
 import random
@@ -65,6 +66,7 @@ NOT_FOUND_BADGE = {
 _PLAYER_FIELD_PATTERN = re.compile(
     r"^(Name|Points|Set\d+|CurrentSet|TieBreak)Player([AB])$"
 )
+_COMMAND_PLAYER_PATTERN = re.compile(r"^Get(?P<field>[A-Za-z0-9]+)Player(?P<player>[AB])$")
 
 
 COMMAND_PLAN: Dict[CourtPhase, Dict[str, CommandPlanEntry]] = {
@@ -618,6 +620,101 @@ def _select_command(state: CourtState, spec_name: str) -> Optional[str]:
     return command_template
 
 
+def _extract_primary_value(flattened: Dict[str, Any]) -> Any:
+    for key in ("Value", "value", "result", "Result"):
+        if key in flattened:
+            return flattened[key]
+    if len(flattened) == 1:
+        return next(iter(flattened.values()))
+    return None
+
+
+def _interpret_player_suffix(value: Any) -> Optional[str]:
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in {"a", "playera", "player a", "1", "true", "yes", "on"}:
+            return "A"
+        if normalized in {"b", "playerb", "player b", "2", "false", "no", "off"}:
+            return "B"
+        return None
+
+    if isinstance(value, bool):
+        return "A" if value else "B"
+
+    if isinstance(value, (int, float)):
+        integer = int(value)
+        if integer == 0 or integer == 1:
+            return "A"
+        if integer == 2:
+            return "B"
+    return None
+
+
+def _map_command_response(command: str, payload: Dict[str, Any]) -> Dict[str, Any]:
+    flattened = _flatten_overlay_payload(payload or {})
+    mapped: Dict[str, Any] = dict(flattened)
+    primary_value = _extract_primary_value(flattened)
+
+    match = _COMMAND_PLAYER_PATTERN.match(command or "")
+    if match:
+        field = match.group("field")
+        suffix = match.group("player")
+        key = f"{field}Player{suffix}"
+        if primary_value is not None:
+            mapped.setdefault(key, primary_value)
+
+        player_key = f"Player{suffix}"
+        player_info: Dict[str, Any] = {}
+        existing = mapped.get(player_key)
+        if isinstance(existing, dict):
+            player_info.update(existing)
+        elif existing not in (None, ""):
+            player_info["Value"] = existing
+
+        lower_field = field.lower()
+        if primary_value is not None:
+            if lower_field == "name":
+                player_info["name"] = primary_value
+            elif lower_field == "points":
+                player_info["points"] = primary_value
+            elif lower_field.startswith("set"):
+                sets = dict(player_info.get("sets") or {})
+                sets[field] = primary_value
+                player_info["sets"] = sets
+            elif lower_field == "currentset":
+                sets = dict(player_info.get("sets") or {})
+                sets["CurrentSet"] = primary_value
+                player_info["sets"] = sets
+            elif lower_field == "tiebreak":
+                player_info["tiebreak"] = primary_value
+
+        if player_info:
+            mapped[player_key] = player_info
+
+        return mapped
+
+    normalized_command = (command or "").strip()
+
+    if normalized_command == "GetOverlayVisibility":
+        if primary_value is not None and "OverlayVisibility" not in mapped:
+            mapped["OverlayVisibility"] = primary_value
+        return mapped
+
+    if normalized_command == "GetServe":
+        if "ServePlayerA" in mapped or "ServePlayerB" in mapped:
+            return mapped
+        suffix = _interpret_player_suffix(primary_value)
+        if suffix == "A":
+            mapped["ServePlayerA"] = True
+            mapped["ServePlayerB"] = False
+        elif suffix == "B":
+            mapped["ServePlayerA"] = False
+            mapped["ServePlayerB"] = True
+        return mapped
+
+    return mapped
+
+
 def _flatten_overlay_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
     flat: Dict[str, Any] = {}
 
@@ -1080,17 +1177,14 @@ def _classify_phase(
     has_any_name = any(part.strip() for part in name_signature.split("|"))
 
     status = snapshot.get("status")
-    if status != SNAPSHOT_STATUS_OK:
-        # Pozostań w IDLE dopóki nie ustabilizujemy nazwisk – nawet jeśli
-        # częściowe dane są już dostępne w innych polach.
-        if not has_any_name:
-            return CourtPhase.IDLE_NAMES
-        if state.name_stability < NAME_STABILIZATION_TICKS:
-            return CourtPhase.IDLE_NAMES
-    elif not has_any_name:
+
+    if status == SNAPSHOT_STATUS_UNAVAILABLE:
         return CourtPhase.IDLE_NAMES
 
-    if state.phase is CourtPhase.IDLE_NAMES and state.name_stability < 12:
+    if not has_any_name:
+        return CourtPhase.IDLE_NAMES
+
+    if state.phase is CourtPhase.IDLE_NAMES and state.name_stability < NAME_STABILIZATION_TICKS:
         return CourtPhase.IDLE_NAMES
 
     if (
@@ -1505,8 +1599,8 @@ def _update_once(
                             _format_payload_for_logging(payload),
                             rate_limits_desc,
                         )
-                        flattened = _flatten_overlay_payload(payload)
-                        final_snapshot = _merge_partial_payload(kort_id, flattened)
+                        mapped_payload = _map_command_response(command, payload)
+                        final_snapshot = _merge_partial_payload(kort_id, mapped_payload)
                         command_succeeded = True
                         break
             finally:
@@ -1596,6 +1690,11 @@ def start_background_updater(
     session: Optional[requests.sessions.Session] = None,
 ) -> None:
     global _thread
+
+    if app.config.get("TESTING") or os.environ.get("PYTEST_CURRENT_TEST"):
+        logger.debug("Pomijam uruchomienie wątku aktualizacji w trybie testowym")
+        return
+
     if _thread and _thread.is_alive():
         return
 

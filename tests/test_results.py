@@ -288,6 +288,27 @@ def test_merge_partial_payload_maps_single_player_fields():
     assert "B" not in snapshot["players"]
 
 
+def test_map_command_response_normalizes_common_commands():
+    mapped_name = results_module._map_command_response(
+        "GetNamePlayerA", {"Value": "I. Świątek"}
+    )
+    assert mapped_name["NamePlayerA"] == "I. Świątek"
+    assert mapped_name["PlayerA"]["name"] == "I. Świątek"
+
+    mapped_points = results_module._map_command_response("GetPointsPlayerB", {"Value": 30})
+    assert mapped_points["PointsPlayerB"] == 30
+    assert mapped_points["PlayerB"]["points"] == 30
+
+    mapped_serve = results_module._map_command_response("GetServe", {"Value": "PlayerB"})
+    assert mapped_serve["ServePlayerA"] is False
+    assert mapped_serve["ServePlayerB"] is True
+
+    mapped_visibility = results_module._map_command_response(
+        "GetOverlayVisibility", {"Value": 0}
+    )
+    assert mapped_visibility["OverlayVisibility"] == 0
+
+
 @pytest.mark.parametrize(
     ("payload", "expected"),
     [
@@ -930,6 +951,31 @@ def test_update_once_cycles_commands_and_transitions(monkeypatch):
             trailing_diffs = diffs[1:] if diffs[0] != 1 else diffs
             assert trailing_diffs and all(diff == 1 for diff in trailing_diffs)
 
+
+
+def test_names_only_snapshot_transitions_after_stabilization():
+    snapshots.clear()
+    results_module.court_states.clear()
+
+    state = results_state_machine.CourtState("names-only")
+    snapshot = {
+        "kort_id": "names-only",
+        "status": SNAPSHOT_STATUS_NO_DATA,
+        "players": {
+            "A": {"name": "Player One", "points": None, "sets": {}},
+            "B": {"name": "Player Two", "points": None, "sets": {}},
+        },
+        "raw": {},
+        "available": True,
+    }
+
+    for tick in range(results_module.NAME_STABILIZATION_TICKS):
+        results_module._process_snapshot(state, snapshot, now=float(tick))
+        if tick + 1 < results_module.NAME_STABILIZATION_TICKS:
+            assert state.phase is CourtPhase.IDLE_NAMES
+
+    assert state.name_stability >= results_module.NAME_STABILIZATION_TICKS
+    assert state.phase is CourtPhase.PRE_START
 
 
 def test_update_once_skips_disabled_courts(monkeypatch):
