@@ -1044,7 +1044,15 @@ def _merge_partial_payload(kort_id: str, partial: Dict[str, Any]) -> Dict[str, A
             player_entry = merged_players.setdefault(suffix, {})
             name = info.get("name")
             if name is not None:
-                player_entry["name"] = name
+                if isinstance(name, str):
+                    if name.strip():
+                        player_entry["name"] = name
+                    else:
+                        existing_name = player_entry.get("name")
+                        if not (isinstance(existing_name, str) and existing_name.strip()):
+                            player_entry["name"] = name
+                else:
+                    player_entry["name"] = name
             points = info.get("points")
             if points is not None:
                 player_entry["points"] = points
