@@ -497,6 +497,42 @@ def test_name_stabilization_triggers_points_schedule_and_snapshot_completion():
     assert state.phase is CourtPhase.LIVE_POINTS
 
 
+def test_idle_names_probe_runs_before_names_when_overlay_unknown():
+    kort_id = "idle-probe-priority"
+    state = results_module._ensure_court_state(kort_id)
+    state.phase_offset = 0.0
+    state._configure_phase_commands(now=0.0)
+
+    state.transition(CourtPhase.LIVE_POINTS, now=0.0)
+
+    snapshot = {
+        "kort_id": kort_id,
+        "status": SNAPSHOT_STATUS_NO_DATA,
+        "players": {"A": {}, "B": {}},
+        "raw": {},
+        "available": None,
+    }
+
+    now = 10.0
+    results_module._process_snapshot(state, snapshot, now)
+
+    assert state.phase is CourtPhase.IDLE_NAMES
+
+    probe_schedule = state.command_schedules["ProbeAvailability"]
+    name_schedule = state.command_schedules["GetNamePlayerA"]
+
+    assert probe_schedule.next_due == pytest.approx(now)
+    assert name_schedule.next_due is not None
+    assert name_schedule.next_due > now
+
+    next_spec = state.pop_due_command(now + 1e-6)
+    assert next_spec == "ProbeAvailability"
+
+    command = results_module._select_command(state, next_spec)
+    assert command == "GetOverlayVisibility"
+    assert state.command_history[-1][1] == "ProbeAvailability"
+
+
 def test_off_stage_limits_requests_per_minute():
     kort_id = "off-stage-limit"
     state = results_module._ensure_court_state(kort_id)
