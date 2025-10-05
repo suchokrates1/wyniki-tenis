@@ -638,7 +638,7 @@ def ensure_snapshot_entry(kort_id: str) -> Dict[str, Any]:
                 "raw": {},
                 "serving": None,
                 "error": None,
-                "available": False,
+                "available": None,
                 "archive": [],
                 "pause_active": False,
                 "pause_minutes": COMMAND_ERROR_PAUSE_MINUTES,
@@ -1004,7 +1004,7 @@ def _merge_partial_payload(kort_id: str, partial: Dict[str, Any]) -> Dict[str, A
         entry.setdefault("archive", entry.get("archive", []))
         entry.setdefault("status", SNAPSHOT_STATUS_NO_DATA)
         entry.setdefault("serving", None)
-        entry.setdefault("available", False)
+        entry.setdefault("available", None)
         entry["last_updated"] = _now_iso()
         entry["error"] = None
         entry["pause_minutes"] = entry.get("pause_minutes") or COMMAND_ERROR_PAUSE_MINUTES
@@ -1022,7 +1022,8 @@ def _merge_partial_payload(kort_id: str, partial: Dict[str, Any]) -> Dict[str, A
         players = parsed["players"]
         serving = parsed["serving"]
         available_value = parsed.get("available")
-        entry["available"] = bool(available_value) if available_value is not None else False
+        if available_value is not None:
+            entry["available"] = bool(available_value)
 
         def _has_player_info(info: Any) -> bool:
             if not isinstance(info, dict):
