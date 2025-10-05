@@ -64,6 +64,9 @@ NOT_FOUND_BADGE = {
     "description": "Kort nie został znaleziony (HTTP 404)",
 }
 
+WAIT_RESET_BADGE_KEY = "wait_reset"
+WAIT_RESET_BADGE_LABEL = "WAIT-RESET"
+
 _PLAYER_FIELD_PATTERN = re.compile(
     r"^(Name|Points|Set\d+|CurrentSet|TieBreak)Player([AB])$"
 )
@@ -162,11 +165,16 @@ COMMAND_PLAN_OFF_STAGE: Dict[Optional[CourtPhase], Dict[str, CommandPlanEntry]] 
     }
 }
 
+COMMAND_PLAN_OFF_UNTIL_RESET: Dict[
+    Optional[CourtPhase], Dict[str, CommandPlanEntry]
+] = {}
+
 COMMAND_PLAN: Dict[
     CourtPollingStage, Dict[Optional[CourtPhase], Dict[str, CommandPlanEntry]]
 ] = {
     CourtPollingStage.NORMAL: COMMAND_PLAN_NORMAL,
     CourtPollingStage.OFF: COMMAND_PLAN_OFF_STAGE,
+    CourtPollingStage.OFF_UNTIL_RESET: COMMAND_PLAN_OFF_UNTIL_RESET,
 }
 
 snapshots_lock = threading.Lock()
@@ -634,10 +642,67 @@ def ensure_snapshot_entry(kort_id: str) -> Dict[str, Any]:
                 "pause_active": False,
                 "pause_minutes": COMMAND_ERROR_PAUSE_MINUTES,
                 "pause_until": None,
+                "polling_stage": CourtPollingStage.NORMAL.value,
+                "wait_reset_until": None,
                 "badges": [],
             },
         )
     return entry
+
+
+def _format_reset_iso(timestamp: Optional[float]) -> Optional[str]:
+    if timestamp is None:
+        return None
+    try:
+        reset_dt = datetime.fromtimestamp(timestamp, timezone.utc)
+    except (OverflowError, OSError, ValueError):
+        return None
+    return reset_dt.isoformat()
+
+
+def _apply_stage_metadata(entry: Dict[str, Any], state: CourtState) -> None:
+    entry["polling_stage"] = state.stage.value
+
+    existing_badges = entry.get("badges") or []
+    if not isinstance(existing_badges, list):
+        existing_badges = [existing_badges]
+
+    filtered_badges: List[Any] = []
+    for badge in existing_badges:
+        if isinstance(badge, dict):
+            key = str(badge.get("key")) if badge.get("key") is not None else ""
+            label = str(badge.get("label")) if badge.get("label") is not None else ""
+            if key == WAIT_RESET_BADGE_KEY or label.upper() == WAIT_RESET_BADGE_LABEL:
+                continue
+        elif isinstance(badge, str) and badge.strip().upper() == WAIT_RESET_BADGE_LABEL:
+            continue
+        filtered_badges.append(badge)
+
+    wait_reset_iso = None
+    if state.stage is CourtPollingStage.OFF_UNTIL_RESET:
+        wait_reset_iso = _format_reset_iso(state.availability_paused_until)
+        badge: Dict[str, Any] = {
+            "key": WAIT_RESET_BADGE_KEY,
+            "label": WAIT_RESET_BADGE_LABEL,
+        }
+        if wait_reset_iso:
+            badge["description"] = (
+                f"Oczekiwanie na reset limitu do {wait_reset_iso}"
+            )
+        filtered_badges.append(badge)
+        entry["wait_reset_until"] = wait_reset_iso
+    else:
+        entry.pop("wait_reset_until", None)
+
+    entry["badges"] = filtered_badges
+
+
+def _update_snapshot_stage_metadata(kort_id: str, state: CourtState) -> Dict[str, Any]:
+    entry = ensure_snapshot_entry(kort_id)
+    with snapshots_lock:
+        _apply_stage_metadata(entry, state)
+        snapshot = copy.deepcopy(entry)
+    return snapshot
 
 
 def _order_players(players: tuple[str, ...], start: str) -> List[str]:
@@ -1062,6 +1127,7 @@ def _merge_partial_payload(kort_id: str, partial: Dict[str, Any]) -> Dict[str, A
         if all(_player_has_payload(merged_players.get(suffix)) for suffix in ("A", "B")):
             entry["status"] = SNAPSHOT_STATUS_OK
 
+        _apply_stage_metadata(entry, _ensure_court_state(kort_id))
         snapshots[str(kort_id)] = entry
         snapshot = copy.deepcopy(entry)
     return snapshot
@@ -1124,6 +1190,7 @@ def _update_snapshot_pause_state(
         entry["pause_active"] = is_paused
         entry["pause_until"] = pause_until_iso
         entry["last_updated"] = _now_iso()
+        _apply_stage_metadata(entry, state)
         snapshot = copy.deepcopy(entry)
 
     return snapshot
@@ -1175,6 +1242,7 @@ def _handle_command_error(
         entry["pause_active"] = is_paused
         entry["pause_until"] = pause_until_iso
         entry["badges"] = copy.deepcopy(badges or [])
+        _apply_stage_metadata(entry, state)
         snapshot = copy.deepcopy(entry)
     return snapshot
 
@@ -1359,11 +1427,18 @@ def _process_snapshot(state: CourtState, snapshot: Dict[str, Any], now: float) -
 
     if availability_value is False:
         if has_visibility_flag:
+            previous_stage = state.stage
             state.set_stage(CourtPollingStage.OFF, now)
             state.apply_availability_pause(now, UNAVAILABLE_SLOW_POLL_SECONDS)
+            if state.stage is not previous_stage:
+                _update_snapshot_stage_metadata(state.kort_id, state)
     elif availability_value is True:
-        state.set_stage(CourtPollingStage.NORMAL, now)
-        state.clear_availability_pause()
+        if state.stage is not CourtPollingStage.OFF_UNTIL_RESET:
+            previous_stage = state.stage
+            state.set_stage(CourtPollingStage.NORMAL, now)
+            state.clear_availability_pause()
+            if state.stage is not previous_stage:
+                _update_snapshot_stage_metadata(state.kort_id, state)
 
 
 def update_snapshot_for_kort(
@@ -1397,6 +1472,7 @@ def _mark_unavailable(kort_id: str, *, error: Optional[str]) -> Dict[str, Any]:
         archive = entry.get("archive", [])
         entry.update(payload)
         entry["archive"] = archive
+        _apply_stage_metadata(entry, _ensure_court_state(kort_id))
         payload = copy.deepcopy(entry)
     return payload
 
@@ -1832,6 +1908,16 @@ def _update_once(
 
         ensure_snapshot_entry(kort_id)
         state = _ensure_court_state(kort_id)
+
+        if state.stage is CourtPollingStage.OFF_UNTIL_RESET:
+            resume_at = state.availability_paused_until
+            if resume_at is not None and current_time + 1e-9 >= resume_at:
+                previous_stage = state.stage
+                state.clear_availability_pause()
+                state.set_stage(CourtPollingStage.NORMAL, current_time)
+                if state.stage is not previous_stage:
+                    _update_snapshot_stage_metadata(kort_id, state)
+
         control_url = (urls or {}).get("control")
         if not control_url:
             logger.warning("Pominięto kort %s - brak adresu control", kort_id)
@@ -1962,10 +2048,22 @@ def _update_once(
                         and daily_limits.get("remaining") <= 0
                     ):
                         reset_candidate = daily_limits.get("reset")
+                        resume_timestamp: Optional[float] = None
                         if reset_candidate is not None:
+                            try:
+                                resume_timestamp = float(reset_candidate)
+                            except (TypeError, ValueError):
+                                resume_timestamp = None
+                        state.set_stage(CourtPollingStage.OFF_UNTIL_RESET, current_time)
+                        if resume_timestamp is not None:
                             _schedule_controlapp_resume(
-                                controlapp_identifier, float(reset_candidate)
+                                controlapp_identifier, resume_timestamp
                             )
+                            wait_seconds = max(0.0, resume_timestamp - current_time)
+                            state.apply_availability_pause(current_time, wait_seconds)
+                        else:
+                            state.clear_availability_pause()
+                        _update_snapshot_stage_metadata(kort_id, state)
                     if status_code == 404:
                         diagnostics = _format_http_error_details(command, response)
                         cooldown_until = current_time + NOT_FOUND_COOLDOWN_SECONDS
