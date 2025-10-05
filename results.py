@@ -1162,12 +1162,14 @@ def _update_command_error_state(
     *,
     now: float,
     spec_name: Optional[str] = None,
+    increment_streak: bool = True,
 ) -> tuple[bool, bool]:
     previous_pause_until = state.paused_until or 0.0
-    state.command_error_streak = min(state.command_error_streak + 1, 10_000)
-    if spec_name:
-        current = state.command_error_streak_by_spec.get(spec_name, 0) + 1
-        state.command_error_streak_by_spec[spec_name] = min(current, 10_000)
+    if increment_streak:
+        state.command_error_streak = min(state.command_error_streak + 1, 10_000)
+        if spec_name:
+            current = state.command_error_streak_by_spec.get(spec_name, 0) + 1
+            state.command_error_streak_by_spec[spec_name] = min(current, 10_000)
 
     pause_active = False
     new_pause_started = False
@@ -2199,7 +2201,10 @@ def _update_once(
                             rate_limits_desc,
                         )
                         _pause_active, new_pause_started = _update_command_error_state(
-                            state, now=current_time, spec_name=spec_name
+                            state,
+                            now=current_time,
+                            spec_name=spec_name,
+                            increment_streak=False,
                         )
                         if new_pause_started:
                             logger.warning(

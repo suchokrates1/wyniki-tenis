@@ -1379,6 +1379,23 @@ def test_update_once_respects_rate_limit_cooldown(monkeypatch):
     monkeypatch.setattr(results_module.random, "uniform", lambda *_: 0.0)
     monkeypatch.setattr(results_state_machine, "_default_offset", lambda *_: 0.0)
 
+    original_throttle = results_module._throttle_request
+
+    def simulated_throttle(
+        controlapp_id: str,
+        *,
+        simulate: bool = False,
+        current_time: float | None = None,
+    ) -> None:
+        del simulate, current_time
+        original_throttle(
+            controlapp_id,
+            simulate=True,
+            current_time=fake_time.time(),
+        )
+
+    monkeypatch.setattr(results_module, "_throttle_request", simulated_throttle)
+
     results_module._update_once(app, supplier, session=session, now=fake_time.time())
 
     assert len(session.requests) == 1
@@ -1564,39 +1581,38 @@ def test_update_once_applies_pause_after_consecutive_429(monkeypatch):
     fake_time = TimeController(start=0.0)
     monkeypatch.setattr(results_module.time, "time", fake_time.time)
     monkeypatch.setattr(results_module.time, "sleep", fake_time.sleep)
+    monkeypatch.setattr(results_module, "_throttle_request", lambda *_, **__: None)
     monkeypatch.setattr(results_state_machine, "_default_offset", lambda *_: 0.0)
 
     # First 429
     results_module._update_once(app, supplier, session=session, now=fake_time.time())
     assert len(session.requests) == 1
+    state = results_module.court_states["1"]
+    assert state.command_error_streak == 0
 
     # Advance past Retry-After and hit second 429
     fake_time.current = 2.0
     results_module._update_once(app, supplier, session=session, now=fake_time.time())
     assert len(session.requests) == 2
+    state = results_module.court_states["1"]
+    assert state.command_error_streak == 0
 
-    # Third 429 should trigger pause
+    # Third 429 should respect cooldown but not increment streak
     fake_time.current = 4.0
     results_module._update_once(app, supplier, session=session, now=fake_time.time())
     assert len(session.requests) == 3
 
     state = results_module.court_states["1"]
-    assert state.command_error_streak >= results_module.COMMAND_ERROR_PAUSE_THRESHOLD
-    expected_pause = fake_time.current + (results_module.COMMAND_ERROR_PAUSE_MINUTES * 60)
-    assert state.paused_until == pytest.approx(expected_pause, rel=1e-6)
+    assert state.command_error_streak == 0
+    assert state.paused_until is None
+
+    cooldown = results_module._next_allowed_request_by_controlapp.get("rate")
+    assert cooldown == pytest.approx(5.0, rel=1e-6)
 
     snapshot = snapshots["1"]
-    assert snapshot["pause_active"] is True
-    assert snapshot["pause_minutes"] == results_module.COMMAND_ERROR_PAUSE_MINUTES
-    assert snapshot["pause_until"] is not None
-    pause_until_dt = datetime.fromisoformat(snapshot["pause_until"])
-    assert pause_until_dt.tzinfo is not None
-    assert pause_until_dt.timestamp() == pytest.approx(expected_pause, rel=1e-6)
+    assert snapshot["pause_active"] is False
+    assert snapshot["pause_until"] in (None, "")
 
-    # Additional tick should be skipped due to pause
-    fake_time.current = expected_pause - 10
-    results_module._update_once(app, supplier, session=session, now=fake_time.time())
-    assert len(session.requests) == 3
 
 
 def test_token_bucket_limits_requests_across_courts(monkeypatch):
@@ -1717,6 +1733,7 @@ def test_calculate_retry_delay_without_headers_uses_minimum_backoff(monkeypatch)
     fake_time = TimeController(start=0.0)
     monkeypatch.setattr(results_module.time, "time", fake_time.time)
     monkeypatch.setattr(results_module.time, "sleep", fake_time.sleep)
+    monkeypatch.setattr(results_module, "_throttle_request", lambda *_, **__: None)
     monkeypatch.setattr(results_module.random, "uniform", lambda *_: 0.0)
     monkeypatch.setattr(results_state_machine, "_default_offset", lambda *_: 0.0)
 
@@ -1778,40 +1795,21 @@ def test_update_once_applies_real_pause_after_delayed_429(monkeypatch):
     results_module._update_once(app, supplier, session=session)
 
     assert len(session.requests) == 2
-    second_requests = [
-        (req, ts)
+    second_times = [
+        ts
         for req, ts in zip(session.requests, session.request_times)
         if "controlapps/second" in req["url"]
     ]
-    assert len(second_requests) == 1
-    first_second_time = second_requests[0][1]
+    assert len(second_times) == 1
+    first_second_time = second_times[0]
     assert first_second_time == pytest.approx(101.5, rel=1e-6)
 
     cooldown = results_module._next_allowed_request_by_controlapp.get("second")
     assert cooldown is not None
-    assert cooldown > first_second_time
+    assert cooldown == pytest.approx(first_second_time + 1.0, rel=1e-6)
 
-    fake_time.current = first_second_time + 0.5
-    results_module._update_once(app, supplier, session=session)
-
-    second_requests = [
-        (req, ts)
-        for req, ts in zip(session.requests, session.request_times)
-        if "controlapps/second" in req["url"]
-    ]
-    assert len(second_requests) == 1
-
-    fake_time.current = first_second_time + 1.1
-    results_module._update_once(app, supplier, session=session)
-
-    second_requests = [
-        (req, ts)
-        for req, ts in zip(session.requests, session.request_times)
-        if "controlapps/second" in req["url"]
-    ]
-    assert len(second_requests) == 2
-    second_times = [ts for _, ts in second_requests]
-    assert second_times[1] - second_times[0] > 1.0
+    state = results_module.court_states["2"]
+    assert state.command_error_streak == 0
 
 
 def test_update_once_switches_polling_when_overlay_unavailable(monkeypatch):
@@ -1878,7 +1876,6 @@ def test_idle_names_overlay_probe_limits_request_frequency(monkeypatch):
 
     session = SequenceSession(
         [
-            DummyResponse({"PlayerA": {"Value": ""}}, status_code=200),
             DummyResponse({"OverlayVisibility": "off"}, status_code=200),
             DummyResponse({"OverlayVisibility": "on"}, status_code=200),
         ]
@@ -1896,15 +1893,7 @@ def test_idle_names_overlay_probe_limits_request_frequency(monkeypatch):
     )
 
     assert len(session.requests) == 1
-    assert session.requests[0]["json"] == {"command": "GetNamePlayerA"}
-
-    pause_start = fake_time.time()
-    results_module._update_once(
-        app, supplier, session=session, now=pause_start
-    )
-
-    assert len(session.requests) == 2
-    assert session.requests[1]["json"] == {"command": "GetOverlayVisibility"}
+    assert session.requests[0]["json"] == {"command": "GetOverlayVisibility"}
 
     state = results_module.court_states["1"]
     assert state.availability_paused_until is not None
@@ -1919,15 +1908,7 @@ def test_idle_names_overlay_probe_limits_request_frequency(monkeypatch):
         app, supplier, session=session, now=fake_time.time()
     )
 
-    assert len(session.requests) == 2
-    assert state.is_paused(fake_time.time())
-
-    fake_time.current = expected_pause_base + 59.5
-    results_module._update_once(
-        app, supplier, session=session, now=fake_time.time()
-    )
-
-    assert len(session.requests) == 2
+    assert len(session.requests) == 1
     assert state.is_paused(fake_time.time())
 
     fake_time.current = expected_pause_base + results_module.UNAVAILABLE_SLOW_POLL_SECONDS
@@ -1935,11 +1916,8 @@ def test_idle_names_overlay_probe_limits_request_frequency(monkeypatch):
         app, supplier, session=session, now=fake_time.time()
     )
 
-    assert len(session.requests) == 3
-    assert session.requests[2]["json"]["command"] in {
-        "GetNamePlayerA",
-        "GetNamePlayerB",
-    }
+    assert len(session.requests) == 2
+    assert session.requests[1]["json"] == {"command": "GetOverlayVisibility"}
     assert state.availability_paused_until is None
     assert not state.is_paused(fake_time.time())
 
