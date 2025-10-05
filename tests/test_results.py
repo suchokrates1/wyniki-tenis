@@ -6,6 +6,8 @@ import shutil
 import subprocess
 import sys
 import textwrap
+from collections import defaultdict
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
@@ -23,7 +25,7 @@ from results import (
     snapshots,
     update_snapshot_for_kort,
 )
-from results_state_machine import CourtPhase
+from results_state_machine import CourtPhase, CourtPollingStage
 
 
 # --- Fixtures -----------------------------------------------------------------
@@ -41,8 +43,11 @@ def setup_function(function):
     snapshots.clear()
     results_module.court_states.clear()
     results_module._last_request_by_controlapp.clear()
-    results_module._recent_request_timestamps.clear()
     results_module._next_allowed_request_by_controlapp.clear()
+    results_module._global_token_balance = (
+        results_module.GLOBAL_TOKEN_BUCKET_CAPACITY
+    )
+    results_module._global_tokens_last_refill = results_module.time.time()
 
 
 # --- Testy widoku /wyniki -----------------------------------------------------
@@ -401,6 +406,33 @@ def test_partial_updates_allow_state_progression():
     assert snapshot["last_updated"] is not None
 
 
+def test_complete_names_trigger_pre_start_within_three_ticks():
+    kort_id = "fast-names"
+    state = results_module._ensure_court_state(kort_id)
+    state.phase_offset = 0.0
+    state._configure_phase_commands(now=0.0)
+
+    payload = results_module._flatten_overlay_payload(
+        {"NamePlayerA": "A. Kowalski", "NamePlayerB": "B. Zielińska"}
+    )
+    snapshot = results_module._merge_partial_payload(kort_id, payload)
+
+    now = 0.0
+    results_module._process_snapshot(state, snapshot, now)
+
+    additional_ticks = max(results_module.NAME_STABILIZATION_TICKS - 1, 0)
+    for _ in range(additional_ticks):
+        now += 1.0
+        results_module._process_snapshot(state, snapshot, now)
+
+    assert results_module.NAME_STABILIZATION_TICKS <= 3
+    assert state.phase is CourtPhase.PRE_START
+
+    schedule = state.command_schedules.get("GetPoints")
+    assert schedule is not None
+    assert schedule.next_due is not None
+
+
 def test_name_stabilization_triggers_points_schedule_and_snapshot_completion():
     kort_id = "phase-schedule"
     state = results_module._ensure_court_state(kort_id)
@@ -463,6 +495,111 @@ def test_name_stabilization_triggers_points_schedule_and_snapshot_completion():
     assert current_snapshot["players"]["A"]["points"] == 30
     assert current_snapshot["players"]["B"]["points"] == 15
     assert state.phase is CourtPhase.LIVE_POINTS
+
+
+def test_off_stage_limits_requests_per_minute():
+    kort_id = "off-stage-limit"
+    state = results_module._ensure_court_state(kort_id)
+    state.phase_offset = 0.0
+    state._configure_phase_commands(now=0.0)
+
+    now = 0.0
+    off_payload = results_module._flatten_overlay_payload({"OverlayVisibility": "off"})
+    snapshot = results_module._merge_partial_payload(kort_id, off_payload)
+
+    results_module._process_snapshot(state, snapshot, now)
+
+    assert state.stage is CourtPollingStage.OFF
+    assert set(state.command_schedules.keys()) == {"OffProbeAvailability"}
+
+    schedule = state.command_schedules["OffProbeAvailability"]
+    assert schedule.spec.interval >= 60.0
+
+    run_times: list[float] = []
+    for _ in range(3):
+        next_due = state.peek_next_due()
+        assert next_due is not None
+        now = next_due + 0.001
+        spec = state.pop_due_command(now)
+        assert spec == "OffProbeAvailability"
+        command = results_module._select_command(state, spec)
+        assert command == "GetOverlayVisibility"
+        run_times.append(now)
+
+    assert all((later - earlier) >= 60.0 for earlier, later in zip(run_times, run_times[1:]))
+    assert len(state.command_history) == 3
+    assert all(name == "OffProbeAvailability" for _, name in state.command_history)
+
+
+def test_off_stage_restores_full_plan_when_available_returns():
+    kort_id = "off-stage-recovery"
+    state = results_module._ensure_court_state(kort_id)
+    state.phase_offset = 0.0
+    state._configure_phase_commands(now=0.0)
+
+    now = 0.0
+    off_payload = results_module._flatten_overlay_payload({"OverlayVisibility": "off"})
+    off_snapshot = results_module._merge_partial_payload(kort_id, off_payload)
+    results_module._process_snapshot(state, off_snapshot, now)
+
+    assert state.stage is CourtPollingStage.OFF
+    assert set(state.command_schedules.keys()) == {"OffProbeAvailability"}
+
+    now += 120.0
+    on_payload = results_module._flatten_overlay_payload({"OverlayVisibility": "on"})
+    on_snapshot = results_module._merge_partial_payload(kort_id, on_payload)
+    results_module._process_snapshot(state, on_snapshot, now)
+
+    assert state.stage is CourtPollingStage.NORMAL
+    plan_keys = set(state.command_schedules.keys())
+    assert {"GetNamePlayerA", "GetNamePlayerB", "ProbeAvailability"}.issubset(plan_keys)
+
+    command = results_module._select_command(state, "GetNamePlayerA")
+    assert command == "GetNamePlayerA"
+
+    overlay_command = results_module._select_command(state, "ProbeAvailability")
+    assert overlay_command == "GetOverlayVisibility"
+
+
+def test_map_command_responses_populates_snapshot_and_transitions():
+    kort_id = "map-responses"
+    state = results_module._ensure_court_state(kort_id)
+    now = 0.0
+    snapshot = {}
+
+    commands = [
+        ("GetNamePlayerA", {"value": "A. Kowalski"}),
+        ("GetNamePlayerB", {"Value": "B. Nowak"}),
+        ("GetOverlayVisibility", {"value": "on"}),
+        ("GetMode", {"value": "Match"}),
+        ("GetServe", {"Value": "A"}),
+        ("GetPointsPlayerA", {"Value": 30}),
+        ("GetPointsPlayerB", {"value": 15}),
+    ]
+
+    for command, payload in commands:
+        mapped = results_module._map_command_response(command, payload)
+        snapshot = results_module._merge_partial_payload(kort_id, mapped)
+        results_module._process_snapshot(state, snapshot, now)
+        now += 1.0
+        if command == "GetNamePlayerB":
+            for _ in range(results_module.NAME_STABILIZATION_TICKS):
+                now += 1.0
+                results_module._process_snapshot(state, snapshot, now)
+
+    assert snapshot["status"] == SNAPSHOT_STATUS_OK
+    assert snapshot["available"] is True
+    assert snapshot["serving"] == "A"
+
+    players = snapshot["players"]
+    assert players["A"]["name"] == "A. Kowalski"
+    assert players["B"]["name"] == "B. Nowak"
+    assert players["A"]["points"] == 30
+    assert players["B"]["points"] == 15
+    assert players["A"]["is_serving"] is True
+    assert players["B"]["is_serving"] is False
+    assert state.phase is not CourtPhase.IDLE_NAMES
+
 
 def test_archive_snapshot_capped_to_limit():
     kort_id = "archive-limit"
@@ -754,23 +891,42 @@ def test_update_once_cycles_commands_and_transitions(monkeypatch):
     assert archive and len(archive) >= 1
     assert archive[0]["players"]["A"]["name"] == "Player One"
     assert snapshots["1"]["players"]["A"]["name"] == "New Player"
-    assert any(phase == CourtPhase.IDLE_NAMES for tick, phase, _ in phase_log if tick >= 160)
+    assert any(
+        phase in {CourtPhase.IDLE_NAMES, CourtPhase.PRE_START}
+        for tick, phase, _ in phase_log
+        if tick >= 160
+    )
     assert state.phase in {CourtPhase.FINISHED, CourtPhase.IDLE_NAMES, CourtPhase.PRE_START}
 
     first_non_idle_tick = next(
         (tick for tick, phase, _ in phase_log if phase is not CourtPhase.IDLE_NAMES),
         None,
     )
-    assert first_non_idle_tick is None or first_non_idle_tick >= 11
-    assert any(phase == CourtPhase.PRE_START for tick, phase, _ in phase_log if 12 <= tick < 40)
-    assert any(phase == CourtPhase.LIVE_POINTS for tick, phase, _ in phase_log if 40 <= tick < 60)
-    assert any(phase == CourtPhase.LIVE_GAMES for tick, phase, _ in phase_log if 60 <= tick < 80)
-    assert any(phase == CourtPhase.LIVE_SETS for tick, phase, _ in phase_log if 80 <= tick < 90)
-    assert any(phase == CourtPhase.TIEBREAK7 for tick, phase, _ in phase_log if 90 <= tick < 100)
-    assert any(phase == CourtPhase.SUPER_TB10 for tick, phase, _ in phase_log if 100 <= tick < 110)
-    assert any(phase == CourtPhase.FINISHED for tick, phase, _ in phase_log if 110 <= tick < 140)
+    stabilization_ticks = results_module.NAME_STABILIZATION_TICKS
+    max_expected_tick = max(stabilization_ticks + 1, 1)
+    assert first_non_idle_tick is None or first_non_idle_tick <= max_expected_tick
+    phases_under_40 = {phase for tick, phase, _ in phase_log if tick < 40}
+    assert CourtPhase.PRE_START in phases_under_40
+    assert any(
+        phase == CourtPhase.LIVE_POINTS for tick, phase, _ in phase_log if 40 <= tick < 60
+    )
+    assert any(
+        phase == CourtPhase.LIVE_GAMES for tick, phase, _ in phase_log if 60 <= tick < 80
+    )
+    assert any(
+        phase == CourtPhase.LIVE_SETS for tick, phase, _ in phase_log if 80 <= tick < 90
+    )
+    assert any(
+        phase == CourtPhase.TIEBREAK7 for tick, phase, _ in phase_log if 90 <= tick < 100
+    )
+    assert any(
+        phase == CourtPhase.SUPER_TB10 for tick, phase, _ in phase_log if 100 <= tick < 110
+    )
+    assert any(
+        phase == CourtPhase.FINISHED for tick, phase, _ in phase_log if 110 <= tick < 140
+    )
     idle_stability = [stability for tick, phase, stability in phase_log if tick < 30]
-    assert idle_stability and max(idle_stability) >= 12
+    assert idle_stability and max(idle_stability) >= stabilization_ticks
 
     history = state.command_history
     early_name_specs = [
@@ -781,7 +937,7 @@ def test_update_once_cycles_commands_and_transitions(monkeypatch):
     assert early_name_specs
     assert early_name_specs[0] == "GetNamePlayerA"
     assert "GetNamePlayerB" in early_name_specs[:3]
-    assert early_name_specs.count("GetNamePlayerA") >= 2
+    assert early_name_specs.count("GetNamePlayerA") >= 1
     assert set(early_name_specs).issubset({"GetNamePlayerA", "GetNamePlayerB"})
     assert any(
         name == "ProbeAvailability" and time < 10 for time, name in history
@@ -790,9 +946,16 @@ def test_update_once_cycles_commands_and_transitions(monkeypatch):
     def consecutive_diffs(times):
         return [round(b - a, 6) for a, b in zip(times, times[1:])]
 
-    idle_command_times = [time for time, _ in history if time < 30]
-    assert idle_command_times
-    assert all(diff == 1 for diff in consecutive_diffs(idle_command_times[:8]))
+    idle_name_history = [
+        (time, name)
+        for time, name in history
+        if time < 30 and name in {"GetNamePlayerA", "GetNamePlayerB"}
+    ]
+    assert idle_name_history
+    assert all(
+        prev[1] != curr[1]
+        for prev, curr in zip(idle_name_history, idle_name_history[1:])
+    )
 
     idle_a_times = [
         time for time, name in history if name == "GetNamePlayerA" and time < 30
@@ -801,11 +964,20 @@ def test_update_once_cycles_commands_and_transitions(monkeypatch):
         time for time, name in history if name == "GetNamePlayerB" and time < 30
     ]
     assert idle_a_times and idle_b_times
+
+    def assert_min_interval(times: list[float]) -> None:
+        diffs = consecutive_diffs(times)
+        if diffs:
+            assert all(diff >= 3 for diff in diffs)
+
+    assert_min_interval(idle_a_times)
+    assert_min_interval(idle_b_times)
+
     paired_idle = list(zip(idle_a_times, idle_b_times))
     assert paired_idle and all(1 <= round(b - a, 6) <= 2 for a, b in paired_idle)
 
     pre_start_points = [
-        time for time, name in history if name == "GetPoints" and 12 <= time < 40
+        time for time, name in history if name == "GetPoints" and time < 40
     ]
     assert pre_start_points
     assert all(diff == 2 for diff in consecutive_diffs(pre_start_points))
@@ -1219,6 +1391,323 @@ def test_update_once_waits_until_cooldown_expires_before_retry(monkeypatch):
     assert len(session.requests) == 2
     assert call_times[-1] == pytest.approx(fake_time.current, rel=1e-6)
 
+
+def test_update_once_honours_daily_limit_header(monkeypatch):
+    snapshots.clear()
+    results_module.court_states.clear()
+
+    overlay_links = {
+        "1": {"control": "https://app.overlays.uno/control/daily"}
+    }
+
+    def supplier():
+        return overlay_links
+
+    success_payload = {
+        "PlayerA": {"value": "Player One"},
+        "PlayerB": {"value": "Player Two"},
+    }
+
+    first_response = DummyResponse(success_payload, status_code=200)
+    first_response.headers["X-Singular-RateLimit-Daily-Calls"] = (
+        "limit=100; remaining=0; reset=400"
+    )
+    second_response = DummyResponse(success_payload, status_code=200)
+    session = SequenceSession([first_response, second_response])
+
+    fake_time = TimeController(start=100.0)
+    monkeypatch.setattr(results_module.time, "time", fake_time.time)
+    monkeypatch.setattr(results_module.time, "sleep", fake_time.sleep)
+    monkeypatch.setattr(results_state_machine, "_default_offset", lambda *_: 0.0)
+
+    results_module._update_once(app, supplier, session=session, now=fake_time.time())
+
+    assert len(session.requests) == 1
+    cooldown = results_module._next_allowed_request_by_controlapp.get("daily")
+    assert cooldown is not None
+    assert cooldown == pytest.approx(400.0, rel=1e-6)
+
+    fake_time.current = 350.0
+    results_module._update_once(app, supplier, session=session, now=fake_time.time())
+    assert len(session.requests) == 1
+
+    fake_time.current = 401.0
+    results_module._update_once(app, supplier, session=session, now=fake_time.time())
+    assert len(session.requests) == 2
+
+
+def test_update_once_applies_pause_after_consecutive_429(monkeypatch):
+    snapshots.clear()
+    results_module.court_states.clear()
+
+    overlay_links = {
+        "1": {"control": "https://app.overlays.uno/control/rate"}
+    }
+
+    def supplier():
+        return overlay_links
+
+    def build_429_response():
+        resp = DummyResponse({"error": "too many"}, status_code=429)
+        resp.headers["Retry-After"] = "1"
+        return resp
+
+    responses = [build_429_response() for _ in range(3)]
+    session = SequenceSession(responses)
+
+    fake_time = TimeController(start=0.0)
+    monkeypatch.setattr(results_module.time, "time", fake_time.time)
+    monkeypatch.setattr(results_module.time, "sleep", fake_time.sleep)
+    monkeypatch.setattr(results_state_machine, "_default_offset", lambda *_: 0.0)
+
+    # First 429
+    results_module._update_once(app, supplier, session=session, now=fake_time.time())
+    assert len(session.requests) == 1
+
+    # Advance past Retry-After and hit second 429
+    fake_time.current = 2.0
+    results_module._update_once(app, supplier, session=session, now=fake_time.time())
+    assert len(session.requests) == 2
+
+    # Third 429 should trigger pause
+    fake_time.current = 4.0
+    results_module._update_once(app, supplier, session=session, now=fake_time.time())
+    assert len(session.requests) == 3
+
+    state = results_module.court_states["1"]
+    assert state.command_error_streak >= results_module.COMMAND_ERROR_PAUSE_THRESHOLD
+    expected_pause = fake_time.current + (results_module.COMMAND_ERROR_PAUSE_MINUTES * 60)
+    assert state.paused_until == pytest.approx(expected_pause, rel=1e-6)
+
+    snapshot = snapshots["1"]
+    assert snapshot["pause_active"] is True
+    assert snapshot["pause_minutes"] == results_module.COMMAND_ERROR_PAUSE_MINUTES
+    assert snapshot["pause_until"] is not None
+    pause_until_dt = datetime.fromisoformat(snapshot["pause_until"])
+    assert pause_until_dt.tzinfo is not None
+    assert pause_until_dt.timestamp() == pytest.approx(expected_pause, rel=1e-6)
+
+    # Additional tick should be skipped due to pause
+    fake_time.current = expected_pause - 10
+    results_module._update_once(app, supplier, session=session, now=fake_time.time())
+    assert len(session.requests) == 3
+
+
+def test_token_bucket_limits_requests_across_courts(monkeypatch):
+    snapshots.clear()
+    results_module.court_states.clear()
+
+    overlay_links = {
+        str(index): {"control": f"https://app.overlays.uno/control/court{index}"}
+        for index in range(1, 5)
+    }
+
+    def supplier():
+        return overlay_links
+
+    fake_time = TimeController(start=0.0)
+    monkeypatch.setattr(results_module.time, "time", fake_time.time)
+    monkeypatch.setattr(results_module.time, "sleep", fake_time.sleep)
+    monkeypatch.setattr(results_state_machine, "_default_offset", lambda *_: 0.0)
+
+    results_module._global_token_balance = (
+        results_module.GLOBAL_TOKEN_BUCKET_CAPACITY
+    )
+    results_module._global_tokens_last_refill = fake_time.time()
+
+    base_payload = {
+        "PlayerA": {"value": "Player One"},
+        "PlayerB": {"value": "Player Two"},
+    }
+
+    class TimedSession(DummySession):
+        def __init__(self, response):
+            super().__init__(response)
+            self.request_times: list[float] = []
+
+        def put(self, url: str, timeout: int, json: dict | None = None):
+            self.request_times.append(fake_time.time())
+            return super().put(url, timeout=timeout, json=json)
+
+    session = TimedSession(DummyResponse(base_payload))
+
+    identifier_to_kort = {f"court{index}": str(index) for index in range(1, 5)}
+
+    total_ticks = 12
+    for _ in range(total_ticks):
+        tick_start = fake_time.time()
+        results_module._update_once(app, supplier, session=session, now=tick_start)
+        elapsed = fake_time.time() - tick_start
+        remaining = max(0.0, results_module.UPDATE_INTERVAL_SECONDS - elapsed)
+        fake_time.sleep(remaining)
+
+    assert session.requests
+    assert len(session.requests) == len(session.request_times)
+
+    per_player_times: dict[str, dict[str, list[float]]] = defaultdict(
+        lambda: defaultdict(list)
+    )
+    per_court_sequences: dict[str, list[str]] = defaultdict(list)
+
+    for request, timestamp in zip(session.requests, session.request_times):
+        payload = request.get("json") or {}
+        command = None
+        if isinstance(payload, dict):
+            command = payload.get("command")
+        if not isinstance(command, str):
+            continue
+
+        url = str(request.get("url") or "")
+        parts = url.rstrip("/").split("/")
+        if len(parts) < 2:
+            continue
+        identifier = parts[-2]
+        kort_id = identifier_to_kort.get(identifier)
+        if not kort_id:
+            continue
+
+        if command.startswith("GetNamePlayer"):
+            player = command[-1]
+            per_player_times[kort_id][player].append(timestamp)
+            per_court_sequences[kort_id].append(command)
+
+    assert per_player_times
+
+    for kort_id, players in per_player_times.items():
+        sequences = per_court_sequences.get(kort_id, [])
+        assert sequences
+        assert all(prev != curr for prev, curr in zip(sequences, sequences[1:]))
+
+        for player, times in players.items():
+            assert times
+            times.sort()
+            diffs = [round(b - a, 6) for a, b in zip(times, times[1:])]
+            if diffs:
+                assert all(diff >= 3 for diff in diffs)
+
+    request_times = session.request_times
+    assert request_times
+    if len(request_times) >= 2:
+        duration = request_times[-1] - request_times[0]
+        assert duration > 0
+        average_rps = len(request_times) / duration
+        assert 1.0 <= average_rps <= 2.3
+
+
+def test_calculate_retry_delay_without_headers_uses_minimum_backoff(monkeypatch):
+    snapshots.clear()
+    results_module.court_states.clear()
+
+    overlay_links = {
+        "1": {"control": "https://app.overlays.uno/control/retry"}
+    }
+
+    def supplier():
+        return overlay_links
+
+    responses = [DummyResponse({}, status_code=500) for _ in range(4)]
+    session = SequenceSession(responses)
+
+    fake_time = TimeController(start=0.0)
+    monkeypatch.setattr(results_module.time, "time", fake_time.time)
+    monkeypatch.setattr(results_module.time, "sleep", fake_time.sleep)
+    monkeypatch.setattr(results_module.random, "uniform", lambda *_: 0.0)
+    monkeypatch.setattr(results_state_machine, "_default_offset", lambda *_: 0.0)
+
+    results_module._update_once(app, supplier, session=session, now=fake_time.time())
+
+    assert len(fake_time.sleep_calls) == 3
+    assert all(duration >= 5.0 for duration in fake_time.sleep_calls)
+    assert fake_time.sleep_calls == [5.0, 10.0, 20.0]
+
+def test_update_once_applies_real_pause_after_delayed_429(monkeypatch):
+    snapshots.clear()
+    results_module.court_states.clear()
+
+    overlay_links = {
+        "1": {"control": "https://app.overlays.uno/control/first"},
+        "2": {"control": "https://app.overlays.uno/control/second"},
+    }
+
+    def supplier():
+        return overlay_links
+
+    success_payload = {
+        "PlayerA": {"value": "Player One"},
+        "PlayerB": {"value": "Player Two"},
+        "PointsPlayerA": {"value": "15"},
+        "PointsPlayerB": {"value": "30"},
+    }
+
+    responses = [
+        DummyResponse(success_payload, status_code=200),
+        DummyResponse({"error": "too many"}, status_code=429),
+        DummyResponse(success_payload, status_code=200),
+        DummyResponse(success_payload, status_code=200),
+        DummyResponse(success_payload, status_code=200),
+    ]
+
+    fake_time = TimeController(start=100.0)
+    monkeypatch.setattr(results_module.time, "time", fake_time.time)
+    monkeypatch.setattr(results_module.time, "sleep", fake_time.sleep)
+    monkeypatch.setattr(results_module.random, "uniform", lambda *_: 0.0)
+    monkeypatch.setattr(results_state_machine, "_default_offset", lambda *_: 0.0)
+
+    class RecordingSession(SequenceSession):
+        def __init__(self, responses_list, clock):
+            super().__init__(responses_list)
+            self._clock = clock
+            self.request_times: list[float] = []
+
+        def put(self, url: str, timeout: int, json: dict | None = None):  # type: ignore[override]
+            call_index = len(self.requests)
+            self.request_times.append(self._clock.time())
+            response = super().put(url, timeout=timeout, json=json)
+            if call_index == 0:
+                self._clock.current += 1.5
+            return response
+
+    session = RecordingSession(responses, fake_time)
+
+    results_module._update_once(app, supplier, session=session)
+
+    assert len(session.requests) == 2
+    second_requests = [
+        (req, ts)
+        for req, ts in zip(session.requests, session.request_times)
+        if "controlapps/second" in req["url"]
+    ]
+    assert len(second_requests) == 1
+    first_second_time = second_requests[0][1]
+    assert first_second_time == pytest.approx(101.5, rel=1e-6)
+
+    cooldown = results_module._next_allowed_request_by_controlapp.get("second")
+    assert cooldown is not None
+    assert cooldown > first_second_time
+
+    fake_time.current = first_second_time + 0.5
+    results_module._update_once(app, supplier, session=session)
+
+    second_requests = [
+        (req, ts)
+        for req, ts in zip(session.requests, session.request_times)
+        if "controlapps/second" in req["url"]
+    ]
+    assert len(second_requests) == 1
+
+    fake_time.current = first_second_time + 1.1
+    results_module._update_once(app, supplier, session=session)
+
+    second_requests = [
+        (req, ts)
+        for req, ts in zip(session.requests, session.request_times)
+        if "controlapps/second" in req["url"]
+    ]
+    assert len(second_requests) == 2
+    second_times = [ts for _, ts in second_requests]
+    assert second_times[1] - second_times[0] > 1.0
+
+
 def test_update_once_switches_polling_when_overlay_unavailable(monkeypatch):
     snapshots.clear()
     results_module.court_states.clear()
@@ -1313,12 +1802,13 @@ def test_idle_names_overlay_probe_limits_request_frequency(monkeypatch):
 
     state = results_module.court_states["1"]
     assert state.availability_paused_until is not None
+    expected_pause_base = fake_time.current
     assert state.availability_paused_until == pytest.approx(
-        pause_start + results_module.UNAVAILABLE_SLOW_POLL_SECONDS, rel=1e-6
+        expected_pause_base + results_module.UNAVAILABLE_SLOW_POLL_SECONDS, rel=1e-6
     )
-    assert state.is_paused(pause_start)
+    assert state.is_paused(expected_pause_base)
 
-    fake_time.current = pause_start + 30.0
+    fake_time.current = expected_pause_base + 30.0
     results_module._update_once(
         app, supplier, session=session, now=fake_time.time()
     )
@@ -1326,7 +1816,7 @@ def test_idle_names_overlay_probe_limits_request_frequency(monkeypatch):
     assert len(session.requests) == 2
     assert state.is_paused(fake_time.time())
 
-    fake_time.current = pause_start + 59.5
+    fake_time.current = expected_pause_base + 59.5
     results_module._update_once(
         app, supplier, session=session, now=fake_time.time()
     )
@@ -1334,7 +1824,7 @@ def test_idle_names_overlay_probe_limits_request_frequency(monkeypatch):
     assert len(session.requests) == 2
     assert state.is_paused(fake_time.time())
 
-    fake_time.current = pause_start + 60.0
+    fake_time.current = expected_pause_base + results_module.UNAVAILABLE_SLOW_POLL_SECONDS
     results_module._update_once(
         app, supplier, session=session, now=fake_time.time()
     )

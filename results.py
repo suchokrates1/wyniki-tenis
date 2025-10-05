@@ -7,15 +7,19 @@ import re
 import threading
 import time
 import uuid
-from collections import deque
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
-from typing import Any, Callable, Deque, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 from urllib.parse import urlparse
 
 import requests
 
-from results_state_machine import CourtPhase, CourtState, ScoreSnapshot
+from results_state_machine import (
+    CourtPhase,
+    CourtPollingStage,
+    CourtState,
+    ScoreSnapshot,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -33,14 +37,14 @@ _SENSITIVE_FIELD_MARKERS = (
 
 UPDATE_INTERVAL_SECONDS = 1
 REQUEST_TIMEOUT_SECONDS = 5
-NAME_STABILIZATION_TICKS = 12
+NAME_STABILIZATION_TICKS = 3
 
 PER_CONTROLAPP_MIN_INTERVAL_SECONDS = 1.0
-GLOBAL_RATE_LIMIT_PER_SECOND = 4
-GLOBAL_RATE_WINDOW_SECONDS = 1.0
+GLOBAL_RATE_LIMIT_PER_SECOND = 2.0
+GLOBAL_TOKEN_BUCKET_CAPACITY = GLOBAL_RATE_LIMIT_PER_SECOND
 MAX_RETRY_ATTEMPTS = 3
-RETRY_BASE_DELAY_SECONDS = 1.0
-RETRY_MAX_DELAY_SECONDS = 10.0
+RETRY_BASE_DELAY_SECONDS = 5.0
+RETRY_MAX_DELAY_SECONDS = 120.0
 RETRY_JITTER_MAX_SECONDS = 0.3
 
 COMMAND_ERROR_PAUSE_THRESHOLD = 3
@@ -52,9 +56,7 @@ FULL_SNAPSHOT_COMMAND = None
 
 ARCHIVE_LIMIT = 50
 
-
 CommandPlanEntry = Dict[str, Any]
-
 
 NOT_FOUND_BADGE = {
     "key": "not_found",
@@ -62,14 +64,11 @@ NOT_FOUND_BADGE = {
     "description": "Kort nie został znaleziony (HTTP 404)",
 }
 
-
 _PLAYER_FIELD_PATTERN = re.compile(
     r"^(Name|Points|Set\d+|CurrentSet|TieBreak)Player([AB])$"
 )
-_COMMAND_PLAYER_PATTERN = re.compile(r"^Get(?P<field>[A-Za-z0-9]+)Player(?P<player>[AB])$")
 
-
-COMMAND_PLAN: Dict[CourtPhase, Dict[str, CommandPlanEntry]] = {
+COMMAND_PLAN_NORMAL: Dict[CourtPhase, Dict[str, CommandPlanEntry]] = {
     CourtPhase.IDLE_NAMES: {
         "GetNamePlayerA": {"commands": ("GetNamePlayerA",)},
         "GetNamePlayerB": {"commands": ("GetNamePlayerB",)},
@@ -157,6 +156,19 @@ COMMAND_PLAN: Dict[CourtPhase, Dict[str, CommandPlanEntry]] = {
     },
 }
 
+COMMAND_PLAN_OFF_STAGE: Dict[Optional[CourtPhase], Dict[str, CommandPlanEntry]] = {
+    None: {
+        "OffProbeAvailability": {"commands": ("GetOverlayVisibility",)},
+    }
+}
+
+COMMAND_PLAN: Dict[
+    CourtPollingStage, Dict[Optional[CourtPhase], Dict[str, CommandPlanEntry]]
+] = {
+    CourtPollingStage.NORMAL: COMMAND_PLAN_NORMAL,
+    CourtPollingStage.OFF: COMMAND_PLAN_OFF_STAGE,
+}
+
 snapshots_lock = threading.Lock()
 snapshots: Dict[str, Dict[str, Any]] = {}
 
@@ -167,7 +179,6 @@ metrics_lock = threading.Lock()
 
 def get_all_snapshots() -> Dict[str, Dict[str, Any]]:
     """Return a deep copy of all current snapshots under a thread lock."""
-
     with snapshots_lock:
         return copy.deepcopy(snapshots)
 
@@ -213,7 +224,9 @@ def _increment_counter(storage: Dict[str, int], key: str) -> None:
     storage[key] = storage.get(key, 0) + 1
 
 
-def _record_response_event(*, status_code: Optional[int] = None, error: Optional[str] = None) -> None:
+def _record_response_event(
+    *, status_code: Optional[int] = None, error: Optional[str] = None
+) -> None:
     with metrics_lock:
         metrics["responses"]["total"] += 1
         metrics["last_response_at"] = _now_iso()
@@ -251,12 +264,15 @@ def _record_tick() -> None:
 def get_metrics_snapshot() -> Dict[str, Any]:
     with metrics_lock:
         return copy.deepcopy(metrics)
+
+
 court_states: Dict[str, CourtState] = {}
 
 _throttle_lock = threading.Lock()
 _last_request_by_controlapp: Dict[str, float] = {}
-_recent_request_timestamps: Deque[float] = deque()
 _next_allowed_request_by_controlapp: Dict[str, float] = {}
+_global_token_balance: float = GLOBAL_TOKEN_BUCKET_CAPACITY
+_global_tokens_last_refill: Optional[float] = time.time()
 
 
 def _shorten_for_logging(text: str, max_length: int = 256) -> str:
@@ -311,6 +327,7 @@ def _format_rate_limit_headers(response: Optional[requests.Response]) -> str:
         ("X-RateLimit-Limit", "limit"),
         ("X-RateLimit-Reset", "reset"),
         ("Retry-After", "retry_after"),
+        ("X-Singular-RateLimit-Daily-Calls", "daily"),
     )
 
     parts: List[str] = []
@@ -347,9 +364,7 @@ def _extract_controlapp_identifier(control_url: str) -> str:
 def build_output_url(control_url: str) -> str:
     if not control_url:
         return control_url
-
     identifier = _extract_controlapp_identifier(control_url)
-
     return f"https://app.overlays.uno/apiv2/controlapps/{identifier}/api"
 
 
@@ -365,15 +380,40 @@ def _throttle_request(
     simulate: bool = False,
     current_time: Optional[float] = None,
 ) -> None:
+    """
+    Token bucket + per-controlapp cooldown + per-controlapp minimalny odstęp.
+    W trybie simulate=True dopuszcza cofanięcie czasu (clamp last_refill do now).
+    """
     if simulate:
         if current_time is None:
             raise ValueError("current_time is required when simulate=True")
         simulated_time = current_time
     else:
         simulated_time = None
+
     while True:
         with _throttle_lock:
             now_value = simulated_time if simulated_time is not None else time.time()
+
+            global _global_token_balance, _global_tokens_last_refill
+            last_refill = _global_tokens_last_refill
+            if last_refill is None:
+                last_refill = now_value
+                _global_tokens_last_refill = now_value
+            # CLAMP: gdy symulowany czas cofnął się względem last_refill
+            if simulated_time is not None and now_value < last_refill:
+                last_refill = now_value
+                _global_tokens_last_refill = now_value
+
+            elapsed = max(0.0, now_value - last_refill)
+            if elapsed > 0.0:
+                refill = elapsed * GLOBAL_RATE_LIMIT_PER_SECOND
+                _global_token_balance = min(
+                    GLOBAL_TOKEN_BUCKET_CAPACITY,
+                    _global_token_balance + refill,
+                )
+                _global_tokens_last_refill = now_value
+
             last = _last_request_by_controlapp.get(controlapp_id)
             wait_for_controlapp = 0.0
             if last is not None:
@@ -384,22 +424,20 @@ def _throttle_request(
             if cooldown_until is not None:
                 wait_for_cooldown = cooldown_until - now_value
 
-            while _recent_request_timestamps and now_value - _recent_request_timestamps[0] >= GLOBAL_RATE_WINDOW_SECONDS:
-                _recent_request_timestamps.popleft()
-
-            global_available = len(_recent_request_timestamps) < GLOBAL_RATE_LIMIT_PER_SECOND
+            global_available = _global_token_balance >= 1.0 - 1e-9
 
             if wait_for_controlapp <= 0 and wait_for_cooldown <= 0 and global_available:
                 _last_request_by_controlapp[controlapp_id] = now_value
-                _recent_request_timestamps.append(now_value)
+                _global_token_balance = max(0.0, _global_token_balance - 1.0)
                 if cooldown_until is not None and now_value + 1e-9 >= cooldown_until:
                     _next_allowed_request_by_controlapp.pop(controlapp_id, None)
                 return
 
             wait_time = max(wait_for_controlapp, wait_for_cooldown, 0.0)
-            if not global_available and _recent_request_timestamps:
-                earliest = _recent_request_timestamps[0]
-                wait_time = max(wait_time, earliest + GLOBAL_RATE_WINDOW_SECONDS - now_value)
+            if not global_available:
+                deficit = max(0.0, 1.0 - _global_token_balance)
+                wait_for_tokens = deficit / GLOBAL_RATE_LIMIT_PER_SECOND
+                wait_time = max(wait_time, wait_for_tokens)
 
         if simulated_time is not None:
             simulated_time = now_value + wait_time
@@ -455,6 +493,36 @@ def _parse_retry_after(response: requests.Response) -> Optional[float]:
         return max(0.0, delta)
 
 
+def _parse_reset_header_value(value: str, *, reference_time: float) -> Optional[float]:
+    value = (value or "").strip()
+    if not value:
+        return None
+
+    # jeżeli to czysta liczba: interpretuj jako epoch lub offset
+    try:
+        numeric_value = float(value)
+    except ValueError:
+        # być może to data HTTP
+        try:
+            reset_dt = parsedate_to_datetime(value)
+        except (TypeError, ValueError):
+            return None
+        if reset_dt is None:
+            return None
+        if reset_dt.tzinfo is None:
+            reset_dt = reset_dt.replace(tzinfo=timezone.utc)
+        return reset_dt.timestamp()
+
+    if numeric_value > reference_time + 1.0:
+        # wygląda jak epoch
+        return numeric_value
+    if numeric_value >= 0:
+        # wyglada jak offset sekund
+        return reference_time + numeric_value
+
+    return None
+
+
 def _parse_rate_limit_reset(
     response: requests.Response, *, reference_time: float
 ) -> Optional[float]:
@@ -466,29 +534,73 @@ def _parse_rate_limit_reset(
     if not header_value:
         return None
 
-    header_value = header_value.strip()
+    return _parse_reset_header_value(str(header_value), reference_time=reference_time)
+
+
+def _parse_singular_daily_calls_header(
+    response: requests.Response, *, reference_time: float
+) -> Optional[Dict[str, Optional[float]]]:
+    """
+    Obsługuje dwa formaty:
+    1) JSON, np.: {"limit":20000,"remaining":0,"reset":1759622401}
+    2) key=value rozdzielane ; lub ,  np.: limit=20000, remaining=0, reset=1759622401
+    """
+    try:
+        header_value = response.headers.get("X-Singular-RateLimit-Daily-Calls")
+    except Exception:  # noqa: BLE001
+        return None
+
     if not header_value:
         return None
 
-    try:
-        numeric_value = float(header_value)
-    except ValueError:
+    text = str(header_value).strip()
+    items: Dict[str, Any] = {}
+
+    # Format JSON
+    if text.startswith("{") and text.endswith("}"):
         try:
-            reset_dt = parsedate_to_datetime(header_value)
+            obj = json.loads(text)
+            if isinstance(obj, dict):
+                items = {str(k).strip().lower(): obj[k] for k in obj.keys()}
+        except Exception:  # noqa: BLE001
+            items = {}
+
+    # Format key=value
+    if not items:
+        for part in re.split(r"[;,]", text):
+            if "=" not in part:
+                continue
+            key, value = part.split("=", 1)
+            key = key.strip().lower()
+            value = value.strip()
+            if not key:
+                continue
+            items[key] = value
+
+    if not items:
+        return None
+
+    def _parse_int(v: Any) -> Optional[int]:
+        if v is None:
+            return None
+        try:
+            return int(float(v))
         except (TypeError, ValueError):
             return None
-        if reset_dt is None:
-            return None
-        if reset_dt.tzinfo is None:
-            reset_dt = reset_dt.replace(tzinfo=timezone.utc)
-        return reset_dt.timestamp()
 
-    if numeric_value > reference_time + 1.0:
-        return numeric_value
-    if numeric_value >= 0:
-        return reference_time + numeric_value
+    limit = _parse_int(items.get("limit"))
+    remaining = _parse_int(items.get("remaining"))
+    reset_raw = items.get("reset")
 
-    return None
+    reset_at: Optional[float] = None
+    if reset_raw is not None:
+        if isinstance(reset_raw, (int, float)):
+            # liczba → epoch
+            reset_at = float(reset_raw)
+        elif isinstance(reset_raw, str):
+            reset_at = _parse_reset_header_value(reset_raw, reference_time=reference_time)
+
+    return {"limit": limit, "remaining": remaining, "reset": reset_at}
 
 
 def _calculate_retry_delay(attempt: int, response: Optional[requests.Response] = None) -> float:
@@ -539,8 +651,16 @@ def _order_players(players: tuple[str, ...], start: str) -> List[str]:
     return ordered
 
 
+def _resolve_command_plan(state: CourtState) -> Dict[str, CommandPlanEntry]:
+    stage_plan = COMMAND_PLAN.get(state.stage) or {}
+    plan = stage_plan.get(state.phase)
+    if plan is None:
+        plan = stage_plan.get(None, {})
+    return plan or {}
+
+
 def _select_command(state: CourtState, spec_name: str) -> Optional[str]:
-    plan = COMMAND_PLAN.get(state.phase) or {}
+    plan = _resolve_command_plan(state)
     entry = plan.get(spec_name)
     if not entry:
         return None
@@ -618,101 +738,6 @@ def _select_command(state: CourtState, spec_name: str) -> Optional[str]:
     if player is not None and "{player}" in command_template:
         return command_template.format(player=player)
     return command_template
-
-
-def _extract_primary_value(flattened: Dict[str, Any]) -> Any:
-    for key in ("Value", "value", "result", "Result"):
-        if key in flattened:
-            return flattened[key]
-    if len(flattened) == 1:
-        return next(iter(flattened.values()))
-    return None
-
-
-def _interpret_player_suffix(value: Any) -> Optional[str]:
-    if isinstance(value, str):
-        normalized = value.strip().lower()
-        if normalized in {"a", "playera", "player a", "1", "true", "yes", "on"}:
-            return "A"
-        if normalized in {"b", "playerb", "player b", "2", "false", "no", "off"}:
-            return "B"
-        return None
-
-    if isinstance(value, bool):
-        return "A" if value else "B"
-
-    if isinstance(value, (int, float)):
-        integer = int(value)
-        if integer == 0 or integer == 1:
-            return "A"
-        if integer == 2:
-            return "B"
-    return None
-
-
-def _map_command_response(command: str, payload: Dict[str, Any]) -> Dict[str, Any]:
-    flattened = _flatten_overlay_payload(payload or {})
-    mapped: Dict[str, Any] = dict(flattened)
-    primary_value = _extract_primary_value(flattened)
-
-    match = _COMMAND_PLAYER_PATTERN.match(command or "")
-    if match:
-        field = match.group("field")
-        suffix = match.group("player")
-        key = f"{field}Player{suffix}"
-        if primary_value is not None:
-            mapped.setdefault(key, primary_value)
-
-        player_key = f"Player{suffix}"
-        player_info: Dict[str, Any] = {}
-        existing = mapped.get(player_key)
-        if isinstance(existing, dict):
-            player_info.update(existing)
-        elif existing not in (None, ""):
-            player_info["Value"] = existing
-
-        lower_field = field.lower()
-        if primary_value is not None:
-            if lower_field == "name":
-                player_info["name"] = primary_value
-            elif lower_field == "points":
-                player_info["points"] = primary_value
-            elif lower_field.startswith("set"):
-                sets = dict(player_info.get("sets") or {})
-                sets[field] = primary_value
-                player_info["sets"] = sets
-            elif lower_field == "currentset":
-                sets = dict(player_info.get("sets") or {})
-                sets["CurrentSet"] = primary_value
-                player_info["sets"] = sets
-            elif lower_field == "tiebreak":
-                player_info["tiebreak"] = primary_value
-
-        if player_info:
-            mapped[player_key] = player_info
-
-        return mapped
-
-    normalized_command = (command or "").strip()
-
-    if normalized_command == "GetOverlayVisibility":
-        if primary_value is not None and "OverlayVisibility" not in mapped:
-            mapped["OverlayVisibility"] = primary_value
-        return mapped
-
-    if normalized_command == "GetServe":
-        if "ServePlayerA" in mapped or "ServePlayerB" in mapped:
-            return mapped
-        suffix = _interpret_player_suffix(primary_value)
-        if suffix == "A":
-            mapped["ServePlayerA"] = True
-            mapped["ServePlayerB"] = False
-        elif suffix == "B":
-            mapped["ServePlayerA"] = False
-            mapped["ServePlayerB"] = True
-        return mapped
-
-    return mapped
 
 
 def _flatten_overlay_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
@@ -1042,6 +1067,68 @@ def _merge_partial_payload(kort_id: str, partial: Dict[str, Any]) -> Dict[str, A
     return snapshot
 
 
+def _update_command_error_state(
+    state: CourtState,
+    *,
+    now: float,
+    spec_name: Optional[str] = None,
+) -> tuple[bool, bool]:
+    previous_pause_until = state.paused_until or 0.0
+    state.command_error_streak = min(state.command_error_streak + 1, 10_000)
+    if spec_name:
+        current = state.command_error_streak_by_spec.get(spec_name, 0) + 1
+        state.command_error_streak_by_spec[spec_name] = min(current, 10_000)
+
+    pause_active = False
+    new_pause_started = False
+    if state.command_error_streak >= COMMAND_ERROR_PAUSE_THRESHOLD:
+        pause_seconds = COMMAND_ERROR_PAUSE_MINUTES * 60
+        candidate_until = now + pause_seconds
+        if state.paused_until is None or candidate_until > state.paused_until:
+            state.paused_until = candidate_until
+        pause_active = state.paused_until is not None and state.paused_until > now
+        if pause_active and previous_pause_until <= now:
+            new_pause_started = True
+
+    return pause_active, new_pause_started
+
+
+def _update_snapshot_pause_state(
+    kort_id: str, state: CourtState, *, now: float
+) -> Dict[str, Any]:
+    entry = ensure_snapshot_entry(kort_id)
+    pause_until_iso = (
+        datetime.fromtimestamp(state.paused_until, timezone.utc).isoformat()
+        if state.paused_until is not None
+        else None
+    )
+    is_paused = state.paused_until is not None and state.paused_until > now
+
+    with snapshots_lock:
+        entry.setdefault("kort_id", str(kort_id))
+        if not isinstance(entry.get("players"), dict):
+            entry["players"] = entry.get("players") or {}
+        else:
+            entry.setdefault("players", {})
+        if not isinstance(entry.get("raw"), dict):
+            entry["raw"] = entry.get("raw") or {}
+        else:
+            entry.setdefault("raw", {})
+        entry.setdefault("archive", entry.get("archive", []))
+        entry.setdefault("status", entry.get("status", SNAPSHOT_STATUS_NO_DATA))
+        entry.setdefault("serving", entry.get("serving"))
+        entry.setdefault("available", entry.get("available", False))
+        entry.setdefault("badges", entry.get("badges", []))
+        entry.setdefault("error", entry.get("error"))
+        entry["pause_minutes"] = entry.get("pause_minutes") or COMMAND_ERROR_PAUSE_MINUTES
+        entry["pause_active"] = is_paused
+        entry["pause_until"] = pause_until_iso
+        entry["last_updated"] = _now_iso()
+        snapshot = copy.deepcopy(entry)
+
+    return snapshot
+
+
 def _handle_command_error(
     kort_id: str,
     error: str,
@@ -1056,21 +1143,11 @@ def _handle_command_error(
     if state is None:
         state = _ensure_court_state(kort_id)
 
-    previous_pause_until = state.paused_until or 0.0
-    state.command_error_streak = min(state.command_error_streak + 1, 10_000)
-    if spec_name:
-        current = state.command_error_streak_by_spec.get(spec_name, 0) + 1
-        state.command_error_streak_by_spec[spec_name] = min(current, 10_000)
+    pause_active, new_pause_started = _update_command_error_state(
+        state, now=now, spec_name=spec_name
+    )
 
-    pause_activated = False
-    if state.command_error_streak >= COMMAND_ERROR_PAUSE_THRESHOLD:
-        pause_seconds = COMMAND_ERROR_PAUSE_MINUTES * 60
-        candidate_until = now + pause_seconds
-        if state.paused_until is None or candidate_until > state.paused_until:
-            state.paused_until = candidate_until
-        pause_activated = state.paused_until is not None and state.paused_until > now
-
-    if pause_activated and previous_pause_until <= now:
+    if new_pause_started:
         logger.warning(
             "Kort %s przechodzi w pauzę na %s min po %s kolejnych błędach",
             kort_id,
@@ -1083,7 +1160,7 @@ def _handle_command_error(
         if state.paused_until is not None
         else None
     )
-    is_paused = state.paused_until is not None and state.paused_until > now
+    is_paused = pause_active
 
     entry = ensure_snapshot_entry(kort_id)
     with snapshots_lock:
@@ -1184,7 +1261,11 @@ def _classify_phase(
     if not has_any_name:
         return CourtPhase.IDLE_NAMES
 
-    if state.phase is CourtPhase.IDLE_NAMES and state.name_stability < NAME_STABILIZATION_TICKS:
+    if (
+        state.phase is CourtPhase.IDLE_NAMES
+        and NAME_STABILIZATION_TICKS > 0
+        and state.name_stability < NAME_STABILIZATION_TICKS
+    ):
         return CourtPhase.IDLE_NAMES
 
     if (
@@ -1226,7 +1307,9 @@ def _classify_phase(
 def _process_snapshot(state: CourtState, snapshot: Dict[str, Any], now: float) -> None:
     state.mark_polled(now)
     name_signature = state.compute_name_signature(snapshot)
-    state.update_name_stability(name_signature)
+    state.update_name_stability(
+        name_signature, required_ticks=NAME_STABILIZATION_TICKS
+    )
     score_snapshot = state.compute_score_snapshot(snapshot)
     state.update_score_stability(score_snapshot)
     desired_phase = _classify_phase(snapshot, state, score_snapshot)
@@ -1274,9 +1357,12 @@ def _process_snapshot(state: CourtState, snapshot: Dict[str, Any], now: float) -
                 has_visibility_flag = True
                 break
 
-    if availability_value is False and has_visibility_flag:
-        state.apply_availability_pause(now, UNAVAILABLE_SLOW_POLL_SECONDS)
+    if availability_value is False:
+        if has_visibility_flag:
+            state.set_stage(CourtPollingStage.OFF, now)
+            state.apply_availability_pause(now, UNAVAILABLE_SLOW_POLL_SECONDS)
     elif availability_value is True:
+        state.set_stage(CourtPollingStage.NORMAL, now)
         state.clear_availability_pause()
 
 
@@ -1315,6 +1401,392 @@ def _mark_unavailable(kort_id: str, *, error: Optional[str]) -> Dict[str, Any]:
     return payload
 
 
+def _map_command_response(command: str, payload: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Mapuje odpowiedź UNO na strukturę, którą rozumie parser snapshotów:
+    - Name/Points/Set*/CurrentSet/TieBreak → PlayerA/PlayerB i *PlayerX klucze
+    - GetServe → ServePlayerA/B
+    - GetOverlayVisibility / GetTieBreakVisibility → booleany
+    - GetMode → Mode
+    """
+    flattened = _flatten_overlay_payload(payload)
+    mapped: Dict[str, Any] = dict(flattened)
+
+    command = command or ""
+
+    def _ensure_player_entry(suffix: str) -> Dict[str, Any]:
+        player_key = f"Player{suffix}"
+        existing = mapped.get(player_key)
+        if isinstance(existing, dict):
+            entry = existing
+        elif existing is None:
+            entry = {}
+            mapped[player_key] = entry
+        else:
+            entry = {"Value": existing}
+            mapped[player_key] = entry
+        return entry
+
+    def _assign_player_field(suffix: str, field: str, value: Any) -> None:
+        key = f"{field}Player{suffix}"
+        mapped[key] = value
+        entry = _ensure_player_entry(suffix)
+        entry[field] = value
+
+    def _extract_from_player(
+        suffix: str, keys: List[str], fallback_keys: Optional[List[str]] = None
+    ) -> Optional[Any]:
+        # spróbuj płaskich kluczy
+        for key in keys:
+            candidate_key = key.format(player=suffix)
+            if candidate_key in flattened:
+                return flattened[candidate_key]
+
+        # spróbuj zagnieżdżonych pod PlayerX
+        player_key = f"Player{suffix}"
+        nested = flattened.get(player_key)
+        if isinstance(nested, dict):
+            for key in keys:
+                normalized_key = key.replace("Player{player}", "")
+                normalized_key = normalized_key.replace("{player}", "")
+                candidate = nested.get(normalized_key) or nested.get(
+                    normalized_key.capitalize()
+                )
+                if candidate is not None:
+                    return candidate
+        elif nested is not None:
+            return nested
+
+        # fallback: dowolny z listy
+        if fallback_keys:
+            for key in fallback_keys:
+                if key in flattened:
+                    return flattened[key]
+        return None
+
+    player_suffix: Optional[str] = None
+    player_match = re.search(r"Player([AB])$", command)
+    if player_match:
+        player_suffix = player_match.group(1)
+
+    if command.startswith("GetNamePlayer") and player_suffix:
+        value = _extract_from_player(
+            player_suffix,
+            [f"NamePlayer{{player}}", "Name", "name", "Value", "value"],
+        )
+        if value is not None:
+            _assign_player_field(player_suffix, "Name", value)
+
+    elif command.startswith("GetPointsPlayer") and player_suffix:
+        value = _extract_from_player(
+            player_suffix,
+            [f"PointsPlayer{{player}}", "Points", "points", "Value", "value"],
+        )
+        if value is not None:
+            _assign_player_field(player_suffix, "Points", value)
+
+    elif command.startswith("GetCurrentSetPlayer") and player_suffix:
+        value = _extract_from_player(
+            player_suffix,
+            [
+                f"CurrentSetPlayer{{player}}",
+                "CurrentSet",
+                "current_set",
+                "Value",
+                "value",
+            ],
+        )
+        if value is not None:
+            _assign_player_field(player_suffix, "CurrentSet", value)
+
+    elif command.startswith("GetTieBreakPlayer") and player_suffix:
+        value = _extract_from_player(
+            player_suffix,
+            [
+                f"TieBreakPlayer{{player}}",
+                "TieBreak",
+                "tiebreak",
+                "Value",
+                "value",
+            ],
+        )
+        if value is not None:
+            _assign_player_field(player_suffix, "TieBreak", value)
+
+    elif command == "GetServe":
+        server_indicator: Optional[str] = None
+        for key in ("Server", "Serve", "CurrentServer", "value", "Value"):
+            candidate = flattened.get(key)
+            if isinstance(candidate, str):
+                normalized = candidate.strip().upper()
+                if normalized in {"A", "B"}:
+                    server_indicator = normalized
+                    break
+
+        if server_indicator is not None:
+            mapped[f"ServePlayer{server_indicator}"] = True
+            _ensure_player_entry(server_indicator)["Serve"] = True
+            other = "B" if server_indicator == "A" else "A"
+            mapped[f"ServePlayer{other}"] = False
+            _ensure_player_entry(other)["Serve"] = False
+        else:
+            for suffix in ("A", "B"):
+                candidate = _extract_from_player(
+                    suffix,
+                    [f"ServePlayer{{player}}", f"Player{{player}}", suffix],
+                    fallback_keys=[f"Serve{suffix}"],
+                )
+                if candidate is None:
+                    continue
+                interpreted = _interpret_visibility_value(candidate)
+                if interpreted is None:
+                    if isinstance(candidate, (int, float)):
+                        interpreted = candidate != 0
+                    elif isinstance(candidate, str):
+                        interpreted = candidate.strip().lower() in {"true", "tak", "on", "1"}
+                if interpreted is None:
+                    continue
+                mapped[f"ServePlayer{suffix}"] = interpreted
+                _ensure_player_entry(suffix)["Serve"] = interpreted
+
+    elif command == "GetOverlayVisibility":
+        interpreted: Optional[bool] = None
+        for key in flattened.keys():
+            interpreted = _interpret_visibility_value(flattened[key])
+            if interpreted is not None:
+                break
+        if interpreted is not None:
+            mapped["OverlayVisibility"] = interpreted
+
+    elif command == "GetTieBreakVisibility":
+        interpreted: Optional[bool] = None
+        for key in flattened.keys():
+            interpreted = _interpret_visibility_value(flattened[key])
+            if interpreted is not None:
+                break
+        if interpreted is not None:
+            mapped["TieBreakVisibility"] = interpreted
+
+    elif command == "GetMode":
+        value = None
+        for key in ("Mode", "mode", "Value", "value"):
+            if key in flattened:
+                value = flattened[key]
+                break
+        if value is not None:
+            mapped["Mode"] = value
+
+    elif command == "GetSet":
+        for key, value in list(flattened.items()):
+            match = _PLAYER_FIELD_PATTERN.match(str(key))
+            if not match:
+                continue
+            field, suffix = match.groups()
+            _assign_player_field(suffix, field, value)
+
+    # spójność: jeśli łapiemy punkty TB, dobrze mieć też flagę widoczności TB (gdy już była)
+    if player_suffix and command.startswith("GetTieBreakPlayer"):
+        mapped.setdefault("TieBreakVisibility", mapped.get("TieBreakVisibility"))
+
+    return mapped
+
+
+def _classify_phase(
+    snapshot: Dict[str, Any], state: CourtState, score: ScoreSnapshot
+) -> CourtPhase:
+    name_signature = state.compute_name_signature(snapshot)
+    has_any_name = any(part.strip() for part in name_signature.split("|"))
+
+    status = snapshot.get("status")
+
+    if status == SNAPSHOT_STATUS_UNAVAILABLE:
+        return CourtPhase.IDLE_NAMES
+
+    if not has_any_name:
+        return CourtPhase.IDLE_NAMES
+
+    if (
+        state.phase is CourtPhase.IDLE_NAMES
+        and NAME_STABILIZATION_TICKS > 0
+        and state.name_stability < NAME_STABILIZATION_TICKS
+    ):
+        return CourtPhase.IDLE_NAMES
+
+    if (
+        state.name_stability < NAME_STABILIZATION_TICKS
+        and not score.points_any
+        and not score.games_any
+        and not score.sets_present
+    ):
+        return CourtPhase.IDLE_NAMES
+
+    sets_won_a, sets_won_b = score.sets_won
+    finished_sets = score.sets_completed >= 1 and (
+        max(sets_won_a, sets_won_b) >= 2 or score.sets_completed >= 3
+    )
+    if finished_sets and state.points_absent_streak >= 2:
+        return CourtPhase.FINISHED
+
+    if score.super_tb_active:
+        return CourtPhase.SUPER_TB10
+
+    if score.tie_break_active:
+        return CourtPhase.TIEBREAK7
+
+    if score.sets_present and score.sets_completed > 0:
+        return CourtPhase.LIVE_SETS
+
+    if score.games_positive:
+        return CourtPhase.LIVE_GAMES
+
+    if state.points_positive_streak >= 2:
+        return CourtPhase.LIVE_POINTS
+
+    if score.points_any or score.games_any or score.sets_present:
+        return CourtPhase.PRE_START
+
+    return CourtPhase.PRE_START
+
+
+def _process_snapshot(state: CourtState, snapshot: Dict[str, Any], now: float) -> None:
+    state.mark_polled(now)
+    name_signature = state.compute_name_signature(snapshot)
+    state.update_name_stability(
+        name_signature, required_ticks=NAME_STABILIZATION_TICKS
+    )
+    score_snapshot = state.compute_score_snapshot(snapshot)
+    state.update_score_stability(score_snapshot)
+    desired_phase = _classify_phase(snapshot, state, score_snapshot)
+    raw_signature = state.compute_raw_signature(snapshot)
+
+    if (
+        state.phase is CourtPhase.FINISHED
+        and desired_phase is CourtPhase.FINISHED
+        and state.finished_name_signature
+        and name_signature != state.finished_name_signature
+    ):
+        state.transition(CourtPhase.IDLE_NAMES, now)
+        return
+
+    if (
+        state.phase is CourtPhase.FINISHED
+        and desired_phase is CourtPhase.FINISHED
+        and state.finished_raw_signature
+        and raw_signature != state.finished_raw_signature
+    ):
+        state.transition(CourtPhase.IDLE_NAMES, now)
+        return
+
+    previous_phase = state.phase
+    state.transition(desired_phase, now)
+
+    if state.phase is CourtPhase.FINISHED:
+        if previous_phase is not CourtPhase.FINISHED:
+            _archive_snapshot(state.kort_id, snapshot)
+        state.finished_name_signature = name_signature
+        state.finished_raw_signature = raw_signature
+    else:
+        state.finished_name_signature = None
+        state.finished_raw_signature = None
+
+    # Harmonogram komend aktualizowany jest w CourtState podczas przejść
+
+    availability_value = snapshot.get("available")
+    raw_payload = snapshot.get("raw")
+    has_visibility_flag = False
+    if isinstance(raw_payload, dict):
+        for key in raw_payload.keys():
+            key_text = str(key).lower()
+            if "overlayvisibility" in key_text or key_text == "overlayvisible":
+                has_visibility_flag = True
+                break
+
+    if availability_value is False:
+        if has_visibility_flag:
+            state.set_stage(CourtPollingStage.OFF, now)
+            state.apply_availability_pause(now, UNAVAILABLE_SLOW_POLL_SECONDS)
+    elif availability_value is True:
+        state.set_stage(CourtPollingStage.NORMAL, now)
+        state.clear_availability_pause()
+
+
+def update_snapshot_for_kort(
+    kort_id: str,
+    control_url: str,
+    *,
+    session: Optional[requests.sessions.Session] = None,
+) -> Dict[str, Any]:
+    entry = ensure_snapshot_entry(kort_id)
+    with snapshots_lock:
+        snapshot = copy.deepcopy(entry)
+    return snapshot
+
+
+def _mark_unavailable(kort_id: str, *, error: Optional[str]) -> Dict[str, Any]:
+    payload = {
+        "kort_id": str(kort_id),
+        "status": SNAPSHOT_STATUS_UNAVAILABLE,
+        "last_updated": _now_iso(),
+        "players": {},
+        "raw": {},
+        "serving": None,
+        "error": error,
+        "available": False,
+        "pause_minutes": COMMAND_ERROR_PAUSE_MINUTES,
+        "pause_active": False,
+        "pause_until": None,
+    }
+    entry = ensure_snapshot_entry(kort_id)
+    with snapshots_lock:
+        archive = entry.get("archive", [])
+        entry.update(payload)
+        entry["archive"] = archive
+        payload = copy.deepcopy(entry)
+    return payload
+
+
+_thread: Optional[threading.Thread] = None
+
+
+def start_background_updater(
+    app,
+    overlay_links_supplier: Callable[[], Dict[str, Dict[str, str]]],
+    *,
+    session: Optional[requests.sessions.Session] = None,
+) -> None:
+    global _thread
+
+    if app.config.get("TESTING") or os.environ.get("PYTEST_CURRENT_TEST"):
+        logger.debug("Pomijam uruchomienie wątku aktualizacji w trybie testowym")
+        return
+
+    if _thread and _thread.is_alive():
+        return
+
+    def runner() -> None:
+        while True:
+            tick_start = time.time()
+            _update_once(app, overlay_links_supplier, session=session, now=tick_start)
+            elapsed = time.time() - tick_start
+            sleep_time = max(0.0, UPDATE_INTERVAL_SECONDS - elapsed)
+            time.sleep(sleep_time)
+
+    # Ustawiamy wstępnie stan kortów na "brak danych"
+    try:
+        with app.app_context():
+            links = overlay_links_supplier() or {}
+        for kort_id in links:
+            ensure_snapshot_entry(kort_id)
+            _ensure_court_state(kort_id)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "Nie udało się wstępnie zainicjować snapshotów kortów: %s", exc
+        )
+
+    _thread = threading.Thread(target=runner, name="kort-snapshots", daemon=True)
+    _thread.start()
+
+
 def _update_once(
     app,
     overlay_links_supplier: Callable[[], Dict[str, Dict[str, Any]]],
@@ -1322,7 +1794,14 @@ def _update_once(
     session: Optional[requests.sessions.Session] = None,
     now: Optional[float] = None,
 ) -> None:
-    current_time = now if now is not None else time.time()
+    time_source = time.time
+    reference_time = time_source()
+    time_offset = (now - reference_time) if now is not None else 0.0
+
+    def refresh_current_time() -> float:
+        return time_source() + time_offset
+
+    current_time = now if now is not None else reference_time
     try:
         with app.app_context():
             links = overlay_links_supplier() or {}
@@ -1330,7 +1809,15 @@ def _update_once(
         logger.warning("Nie udało się pobrać listy kortów: %s", exc)
         return
 
+    first_iteration = True
     for kort_id, urls in links.items():
+        if first_iteration:
+            if now is None:
+                current_time = refresh_current_time()
+            first_iteration = False
+        else:
+            current_time = refresh_current_time()
+
         if not (urls or {}).get("enabled", True):
             logger.debug("Pominięto kort %s - polling wyłączony", kort_id)
             continue
@@ -1392,6 +1879,7 @@ def _update_once(
         if not command:
             state.tick_counter += 1
             _record_tick()
+            current_time = refresh_current_time()
             state.mark_polled(current_time)
             continue
 
@@ -1454,7 +1942,22 @@ def _update_once(
                     break
 
                 if response is not None:
+                    response_time = refresh_current_time()
+                    current_time = response_time
                     _record_response_event(status_code=status_code)
+                    daily_limits = _parse_singular_daily_calls_header(
+                        response, reference_time=response_time
+                    )
+                    if (
+                        daily_limits
+                        and daily_limits.get("remaining") is not None
+                        and daily_limits.get("remaining") <= 0
+                    ):
+                        reset_candidate = daily_limits.get("reset")
+                        if reset_candidate is not None:
+                            _schedule_controlapp_resume(
+                                controlapp_identifier, float(reset_candidate)
+                            )
                     if status_code == 404:
                         diagnostics = _format_http_error_details(command, response)
                         cooldown_until = current_time + NOT_FOUND_COOLDOWN_SECONDS
@@ -1565,6 +2068,19 @@ def _update_once(
                             reset_iso,
                             rate_limits_desc,
                         )
+                        _pause_active, new_pause_started = _update_command_error_state(
+                            state, now=current_time, spec_name=spec_name
+                        )
+                        if new_pause_started:
+                            logger.warning(
+                                "Kort %s przechodzi w pauzę na %s min po %s kolejnych błędach",
+                                kort_id,
+                                COMMAND_ERROR_PAUSE_MINUTES,
+                                state.command_error_streak,
+                            )
+                        _update_snapshot_pause_state(
+                            kort_id, state, now=current_time
+                        )
                         break
 
                     if status_code >= 500:
@@ -1673,53 +2189,12 @@ def _update_once(
             state.clear_pause()
 
         if final_snapshot is not None:
+            current_time = refresh_current_time()
             _record_snapshot_metrics(final_snapshot)
             _process_snapshot(state, final_snapshot, current_time)
 
         state.tick_counter += 1
         _record_tick()
-
-
-_thread: Optional[threading.Thread] = None
-
-
-def start_background_updater(
-    app,
-    overlay_links_supplier: Callable[[], Dict[str, Dict[str, str]]],
-    *,
-    session: Optional[requests.sessions.Session] = None,
-) -> None:
-    global _thread
-
-    if app.config.get("TESTING") or os.environ.get("PYTEST_CURRENT_TEST"):
-        logger.debug("Pomijam uruchomienie wątku aktualizacji w trybie testowym")
-        return
-
-    if _thread and _thread.is_alive():
-        return
-
-    def runner() -> None:
-        while True:
-            tick_start = time.time()
-            _update_once(app, overlay_links_supplier, session=session, now=tick_start)
-            elapsed = time.time() - tick_start
-            sleep_time = max(0.0, UPDATE_INTERVAL_SECONDS - elapsed)
-            time.sleep(sleep_time)
-
-    # Ustawiamy wstępnie stan kortów na "brak danych"
-    try:
-        with app.app_context():
-            links = overlay_links_supplier() or {}
-        for kort_id in links:
-            ensure_snapshot_entry(kort_id)
-            _ensure_court_state(kort_id)
-    except Exception as exc:  # noqa: BLE001
-        logger.warning(
-            "Nie udało się wstępnie zainicjować snapshotów kortów: %s", exc
-        )
-
-    _thread = threading.Thread(target=runner, name="kort-snapshots", daemon=True)
-    _thread.start()
 
 
 __all__ = [
@@ -1737,4 +2212,3 @@ __all__ = [
     "start_background_updater",
     "update_snapshot_for_kort",
 ]
-
