@@ -9,7 +9,7 @@ import time
 import uuid
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, cast
 from urllib.parse import urlparse
 
 import requests
@@ -1830,6 +1830,43 @@ def _update_once(
         spec_name = state.pop_due_command(current_time)
         if not spec_name:
             continue
+
+        overridden_spec_name: Optional[str] = None
+        snapshot_available: Optional[bool]
+        with snapshots_lock:
+            snapshot_entry = snapshots.get(str(kort_id)) or {}
+            snapshot_available = cast(Optional[bool], snapshot_entry.get("available"))
+
+        if (
+            state.stage is CourtPollingStage.OFF
+            and snapshot_available is False
+            and spec_name != "OffProbeAvailability"
+        ):
+            overridden_spec_name = "OffProbeAvailability"
+        elif (
+            snapshot_available is None
+            and spec_name not in {"ProbeAvailability", "OffProbeAvailability"}
+        ):
+            overridden_spec_name = "ProbeAvailability"
+
+        if overridden_spec_name and overridden_spec_name != spec_name:
+            original_spec_name = spec_name
+            spec_name = overridden_spec_name
+
+            original_schedule = state.command_schedules.get(original_spec_name)
+            if original_schedule is not None:
+                original_schedule.last_run = None
+                original_schedule.next_due = current_time
+
+            override_schedule = state.command_schedules.get(overridden_spec_name)
+            if override_schedule is not None:
+                override_schedule.next_due = current_time
+                override_schedule.mark_run(current_time)
+
+            state.last_command = spec_name
+            if state.command_history:
+                last_time, _ = state.command_history[-1]
+                state.command_history[-1] = (last_time, spec_name)
 
         command = _select_command(state, spec_name)
         if not command:
