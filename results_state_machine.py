@@ -148,8 +148,8 @@ class CommandSchedule:
 # Uwaga: nazwy komend są abstrakcyjne (mapujesz je później na konkretne API: Points A/B, Games A/B itd.)
 _NORMAL_COMMAND_SPECS: Dict[CourtPhase, List[CommandSpec]] = {
     CourtPhase.IDLE_NAMES: [
-        CommandSpec("GetNamePlayerA", interval=3.0, offset=0.0, initial_delay=0.0),
-        CommandSpec("GetNamePlayerB", interval=3.0, offset=1.5, initial_delay=0.0),
+        CommandSpec("GetNamePlayerA", interval=3.0, offset=0.0, initial_delay=0.2),
+        CommandSpec("GetNamePlayerB", interval=3.0, offset=1.5, initial_delay=0.2),
         CommandSpec("ProbeAvailability", interval=60.0, offset=0.0, initial_delay=0.0),
     ],
     CourtPhase.PRE_START: [

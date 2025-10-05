@@ -1432,6 +1432,9 @@ def _map_command_response(command: str, payload: Dict[str, Any]) -> Dict[str, An
         mapped[key] = value
         entry = _ensure_player_entry(suffix)
         entry[field] = value
+        lowercase_field = field.lower()
+        if lowercase_field != field:
+            entry[lowercase_field] = value
 
     def _extract_from_player(
         suffix: str, keys: List[str], fallback_keys: Optional[List[str]] = None
@@ -1522,6 +1525,11 @@ def _map_command_response(command: str, payload: Dict[str, Any]) -> Dict[str, An
                 if normalized in {"A", "B"}:
                     server_indicator = normalized
                     break
+
+        if server_indicator is None and candidate is not None:
+            normalized_compact = normalized.replace(" ", "").replace("_", "")
+            if normalized_compact.startswith("PLAYER") and normalized_compact[-1:] in {"A", "B"}:
+                server_indicator = normalized_compact[-1]
 
         if server_indicator is not None:
             mapped[f"ServePlayer{server_indicator}"] = True
