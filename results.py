@@ -1,4 +1,5 @@
 import copy
+import os
 import json
 import logging
 import random
@@ -55,9 +56,7 @@ FULL_SNAPSHOT_COMMAND = None
 
 ARCHIVE_LIMIT = 50
 
-
 CommandPlanEntry = Dict[str, Any]
-
 
 NOT_FOUND_BADGE = {
     "key": "not_found",
@@ -65,11 +64,9 @@ NOT_FOUND_BADGE = {
     "description": "Kort nie został znaleziony (HTTP 404)",
 }
 
-
 _PLAYER_FIELD_PATTERN = re.compile(
     r"^(Name|Points|Set\d+|CurrentSet|TieBreak)Player([AB])$"
 )
-
 
 COMMAND_PLAN_NORMAL: Dict[CourtPhase, Dict[str, CommandPlanEntry]] = {
     CourtPhase.IDLE_NAMES: {
@@ -182,7 +179,6 @@ metrics_lock = threading.Lock()
 
 def get_all_snapshots() -> Dict[str, Dict[str, Any]]:
     """Return a deep copy of all current snapshots under a thread lock."""
-
     with snapshots_lock:
         return copy.deepcopy(snapshots)
 
@@ -228,7 +224,9 @@ def _increment_counter(storage: Dict[str, int], key: str) -> None:
     storage[key] = storage.get(key, 0) + 1
 
 
-def _record_response_event(*, status_code: Optional[int] = None, error: Optional[str] = None) -> None:
+def _record_response_event(
+    *, status_code: Optional[int] = None, error: Optional[str] = None
+) -> None:
     with metrics_lock:
         metrics["responses"]["total"] += 1
         metrics["last_response_at"] = _now_iso()
@@ -266,6 +264,8 @@ def _record_tick() -> None:
 def get_metrics_snapshot() -> Dict[str, Any]:
     with metrics_lock:
         return copy.deepcopy(metrics)
+
+
 court_states: Dict[str, CourtState] = {}
 
 _throttle_lock = threading.Lock()
@@ -364,9 +364,7 @@ def _extract_controlapp_identifier(control_url: str) -> str:
 def build_output_url(control_url: str) -> str:
     if not control_url:
         return control_url
-
     identifier = _extract_controlapp_identifier(control_url)
-
     return f"https://app.overlays.uno/apiv2/controlapps/{identifier}/api"
 
 
@@ -382,21 +380,31 @@ def _throttle_request(
     simulate: bool = False,
     current_time: Optional[float] = None,
 ) -> None:
+    """
+    Token bucket + per-controlapp cooldown + per-controlapp minimalny odstęp.
+    W trybie simulate=True dopuszcza cofanięcie czasu (clamp last_refill do now).
+    """
     if simulate:
         if current_time is None:
             raise ValueError("current_time is required when simulate=True")
         simulated_time = current_time
     else:
         simulated_time = None
+
     while True:
         with _throttle_lock:
             now_value = simulated_time if simulated_time is not None else time.time()
-            global _global_token_balance, _global_tokens_last_refill
 
+            global _global_token_balance, _global_tokens_last_refill
             last_refill = _global_tokens_last_refill
             if last_refill is None:
                 last_refill = now_value
                 _global_tokens_last_refill = now_value
+            # CLAMP: gdy symulowany czas cofnął się względem last_refill
+            if simulated_time is not None and now_value < last_refill:
+                last_refill = now_value
+                _global_tokens_last_refill = now_value
+
             elapsed = max(0.0, now_value - last_refill)
             if elapsed > 0.0:
                 refill = elapsed * GLOBAL_RATE_LIMIT_PER_SECOND
@@ -490,9 +498,11 @@ def _parse_reset_header_value(value: str, *, reference_time: float) -> Optional[
     if not value:
         return None
 
+    # jeżeli to czysta liczba: interpretuj jako epoch lub offset
     try:
         numeric_value = float(value)
     except ValueError:
+        # być może to data HTTP
         try:
             reset_dt = parsedate_to_datetime(value)
         except (TypeError, ValueError):
@@ -504,8 +514,10 @@ def _parse_reset_header_value(value: str, *, reference_time: float) -> Optional[
         return reset_dt.timestamp()
 
     if numeric_value > reference_time + 1.0:
+        # wygląda jak epoch
         return numeric_value
     if numeric_value >= 0:
+        # wyglada jak offset sekund
         return reference_time + numeric_value
 
     return None
@@ -528,6 +540,11 @@ def _parse_rate_limit_reset(
 def _parse_singular_daily_calls_header(
     response: requests.Response, *, reference_time: float
 ) -> Optional[Dict[str, Optional[float]]]:
+    """
+    Obsługuje dwa formaty:
+    1) JSON, np.: {"limit":20000,"remaining":0,"reset":1759622401}
+    2) key=value rozdzielane ; lub ,  np.: limit=20000, remaining=0, reset=1759622401
+    """
     try:
         header_value = response.headers.get("X-Singular-RateLimit-Daily-Calls")
     except Exception:  # noqa: BLE001
@@ -536,36 +553,52 @@ def _parse_singular_daily_calls_header(
     if not header_value:
         return None
 
-    items: Dict[str, str] = {}
-    for part in re.split(r"[;,]", str(header_value)):
-        if "=" not in part:
-            continue
-        key, value = part.split("=", 1)
-        key = key.strip().lower()
-        value = value.strip()
-        if not key:
-            continue
-        items[key] = value
+    text = str(header_value).strip()
+    items: Dict[str, Any] = {}
+
+    # Format JSON
+    if text.startswith("{") and text.endswith("}"):
+        try:
+            obj = json.loads(text)
+            if isinstance(obj, dict):
+                items = {str(k).strip().lower(): obj[k] for k in obj.keys()}
+        except Exception:  # noqa: BLE001
+            items = {}
+
+    # Format key=value
+    if not items:
+        for part in re.split(r"[;,]", text):
+            if "=" not in part:
+                continue
+            key, value = part.split("=", 1)
+            key = key.strip().lower()
+            value = value.strip()
+            if not key:
+                continue
+            items[key] = value
 
     if not items:
         return None
 
-    def _parse_int(value: Optional[str]) -> Optional[int]:
-        if value is None:
+    def _parse_int(v: Any) -> Optional[int]:
+        if v is None:
             return None
         try:
-            return int(float(value))
+            return int(float(v))
         except (TypeError, ValueError):
             return None
 
     limit = _parse_int(items.get("limit"))
     remaining = _parse_int(items.get("remaining"))
     reset_raw = items.get("reset")
-    reset_at = (
-        _parse_reset_header_value(reset_raw, reference_time=reference_time)
-        if reset_raw
-        else None
-    )
+
+    reset_at: Optional[float] = None
+    if reset_raw is not None:
+        if isinstance(reset_raw, (int, float)):
+            # liczba → epoch
+            reset_at = float(reset_raw)
+        elif isinstance(reset_raw, str):
+            reset_at = _parse_reset_header_value(reset_raw, reference_time=reference_time)
 
     return {"limit": limit, "remaining": remaining, "reset": reset_at}
 
@@ -757,185 +790,6 @@ def _flatten_overlay_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
         flat[player_key] = base
 
     return flat
-
-
-def _map_command_response(command: str, payload: Dict[str, Any]) -> Dict[str, Any]:
-    flattened = _flatten_overlay_payload(payload)
-    mapped: Dict[str, Any] = dict(flattened)
-
-    command = command or ""
-
-    def _ensure_player_entry(suffix: str) -> Dict[str, Any]:
-        player_key = f"Player{suffix}"
-        existing = mapped.get(player_key)
-        if isinstance(existing, dict):
-            entry = existing
-        elif existing is None:
-            entry = {}
-            mapped[player_key] = entry
-        else:
-            entry = {"Value": existing}
-            mapped[player_key] = entry
-        return entry
-
-    def _assign_player_field(suffix: str, field: str, value: Any) -> None:
-        key = f"{field}Player{suffix}"
-        mapped[key] = value
-        entry = _ensure_player_entry(suffix)
-        entry[field] = value
-
-    def _extract_from_player(
-        suffix: str, keys: List[str], fallback_keys: Optional[List[str]] = None
-    ) -> Optional[Any]:
-        for key in keys:
-            candidate_key = key.format(player=suffix)
-            if candidate_key in flattened:
-                return flattened[candidate_key]
-
-        player_key = f"Player{suffix}"
-        nested = flattened.get(player_key)
-        if isinstance(nested, dict):
-            for key in keys:
-                normalized_key = key.replace("Player{player}", "")
-                normalized_key = normalized_key.replace("{player}", "")
-                candidate = nested.get(normalized_key) or nested.get(
-                    normalized_key.capitalize()
-                )
-                if candidate is not None:
-                    return candidate
-        elif nested is not None:
-            return nested
-
-        if fallback_keys:
-            for key in fallback_keys:
-                if key in flattened:
-                    return flattened[key]
-        return None
-
-    player_suffix: Optional[str] = None
-    player_match = re.search(r"Player([AB])$", command)
-    if player_match:
-        player_suffix = player_match.group(1)
-
-    if command.startswith("GetNamePlayer") and player_suffix:
-        value = _extract_from_player(
-            player_suffix,
-            [f"NamePlayer{{player}}", "Name", "name", "Value", "value"],
-        )
-        if value is not None:
-            _assign_player_field(player_suffix, "Name", value)
-
-    elif command.startswith("GetPointsPlayer") and player_suffix:
-        value = _extract_from_player(
-            player_suffix,
-            [f"PointsPlayer{{player}}", "Points", "points", "Value", "value"],
-        )
-        if value is not None:
-            _assign_player_field(player_suffix, "Points", value)
-
-    elif command.startswith("GetCurrentSetPlayer") and player_suffix:
-        value = _extract_from_player(
-            player_suffix,
-            [
-                f"CurrentSetPlayer{{player}}",
-                "CurrentSet",
-                "current_set",
-                "Value",
-                "value",
-            ],
-        )
-        if value is not None:
-            _assign_player_field(player_suffix, "CurrentSet", value)
-
-    elif command.startswith("GetTieBreakPlayer") and player_suffix:
-        value = _extract_from_player(
-            player_suffix,
-            [
-                f"TieBreakPlayer{{player}}",
-                "TieBreak",
-                "tiebreak",
-                "Value",
-                "value",
-            ],
-        )
-        if value is not None:
-            _assign_player_field(player_suffix, "TieBreak", value)
-
-    elif command == "GetServe":
-        server_indicator: Optional[str] = None
-        for key in ("Server", "Serve", "CurrentServer", "value", "Value"):
-            candidate = flattened.get(key)
-            if isinstance(candidate, str):
-                normalized = candidate.strip().upper()
-                if normalized in {"A", "B"}:
-                    server_indicator = normalized
-                    break
-
-        if server_indicator is not None:
-            mapped[f"ServePlayer{server_indicator}"] = True
-            _ensure_player_entry(server_indicator)["Serve"] = True
-            other = "B" if server_indicator == "A" else "A"
-            mapped[f"ServePlayer{other}"] = False
-            _ensure_player_entry(other)["Serve"] = False
-        else:
-            for suffix in ("A", "B"):
-                candidate = _extract_from_player(
-                    suffix,
-                    [f"ServePlayer{{player}}", f"Player{{player}}", suffix],
-                    fallback_keys=[f"Serve{suffix}"]
-                )
-                if candidate is None:
-                    continue
-                interpreted = _interpret_visibility_value(candidate)
-                if interpreted is None:
-                    if isinstance(candidate, (int, float)):
-                        interpreted = candidate != 0
-                    elif isinstance(candidate, str):
-                        interpreted = candidate.strip().lower() in {"true", "tak", "on", "1"}
-                if interpreted is None:
-                    continue
-                mapped[f"ServePlayer{suffix}"] = interpreted
-                _ensure_player_entry(suffix)["Serve"] = interpreted
-
-    elif command == "GetOverlayVisibility":
-        interpreted: Optional[bool] = None
-        for key in flattened.keys():
-            interpreted = _interpret_visibility_value(flattened[key])
-            if interpreted is not None:
-                break
-        if interpreted is not None:
-            mapped["OverlayVisibility"] = interpreted
-
-    elif command == "GetTieBreakVisibility":
-        interpreted: Optional[bool] = None
-        for key in flattened.keys():
-            interpreted = _interpret_visibility_value(flattened[key])
-            if interpreted is not None:
-                break
-        if interpreted is not None:
-            mapped["TieBreakVisibility"] = interpreted
-
-    elif command == "GetMode":
-        value = None
-        for key in ("Mode", "mode", "Value", "value"):
-            if key in flattened:
-                value = flattened[key]
-                break
-        if value is not None:
-            mapped["Mode"] = value
-
-    elif command == "GetSet":
-        for key, value in list(flattened.items()):
-            match = _PLAYER_FIELD_PATTERN.match(str(key))
-            if not match:
-                continue
-            field, suffix = match.groups()
-            _assign_player_field(suffix, field, value)
-
-    if player_suffix and command.startswith("GetTieBreakPlayer"):
-        mapped.setdefault("TieBreakVisibility", mapped.get("TieBreakVisibility"))
-
-    return mapped
 
 
 def _interpret_visibility_value(value: Any) -> Optional[bool]:
@@ -1400,14 +1254,11 @@ def _classify_phase(
     has_any_name = any(part.strip() for part in name_signature.split("|"))
 
     status = snapshot.get("status")
-    if status != SNAPSHOT_STATUS_OK:
-        # Pozostań w IDLE dopóki nie ustabilizujemy nazwisk – nawet jeśli
-        # częściowe dane są już dostępne w innych polach.
-        if not has_any_name:
-            return CourtPhase.IDLE_NAMES
-        if state.name_stability < NAME_STABILIZATION_TICKS:
-            return CourtPhase.IDLE_NAMES
-    elif not has_any_name:
+
+    if status == SNAPSHOT_STATUS_UNAVAILABLE:
+        return CourtPhase.IDLE_NAMES
+
+    if not has_any_name:
         return CourtPhase.IDLE_NAMES
 
     if (
@@ -1548,6 +1399,392 @@ def _mark_unavailable(kort_id: str, *, error: Optional[str]) -> Dict[str, Any]:
         entry["archive"] = archive
         payload = copy.deepcopy(entry)
     return payload
+
+
+def _map_command_response(command: str, payload: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Mapuje odpowiedź UNO na strukturę, którą rozumie parser snapshotów:
+    - Name/Points/Set*/CurrentSet/TieBreak → PlayerA/PlayerB i *PlayerX klucze
+    - GetServe → ServePlayerA/B
+    - GetOverlayVisibility / GetTieBreakVisibility → booleany
+    - GetMode → Mode
+    """
+    flattened = _flatten_overlay_payload(payload)
+    mapped: Dict[str, Any] = dict(flattened)
+
+    command = command or ""
+
+    def _ensure_player_entry(suffix: str) -> Dict[str, Any]:
+        player_key = f"Player{suffix}"
+        existing = mapped.get(player_key)
+        if isinstance(existing, dict):
+            entry = existing
+        elif existing is None:
+            entry = {}
+            mapped[player_key] = entry
+        else:
+            entry = {"Value": existing}
+            mapped[player_key] = entry
+        return entry
+
+    def _assign_player_field(suffix: str, field: str, value: Any) -> None:
+        key = f"{field}Player{suffix}"
+        mapped[key] = value
+        entry = _ensure_player_entry(suffix)
+        entry[field] = value
+
+    def _extract_from_player(
+        suffix: str, keys: List[str], fallback_keys: Optional[List[str]] = None
+    ) -> Optional[Any]:
+        # spróbuj płaskich kluczy
+        for key in keys:
+            candidate_key = key.format(player=suffix)
+            if candidate_key in flattened:
+                return flattened[candidate_key]
+
+        # spróbuj zagnieżdżonych pod PlayerX
+        player_key = f"Player{suffix}"
+        nested = flattened.get(player_key)
+        if isinstance(nested, dict):
+            for key in keys:
+                normalized_key = key.replace("Player{player}", "")
+                normalized_key = normalized_key.replace("{player}", "")
+                candidate = nested.get(normalized_key) or nested.get(
+                    normalized_key.capitalize()
+                )
+                if candidate is not None:
+                    return candidate
+        elif nested is not None:
+            return nested
+
+        # fallback: dowolny z listy
+        if fallback_keys:
+            for key in fallback_keys:
+                if key in flattened:
+                    return flattened[key]
+        return None
+
+    player_suffix: Optional[str] = None
+    player_match = re.search(r"Player([AB])$", command)
+    if player_match:
+        player_suffix = player_match.group(1)
+
+    if command.startswith("GetNamePlayer") and player_suffix:
+        value = _extract_from_player(
+            player_suffix,
+            [f"NamePlayer{{player}}", "Name", "name", "Value", "value"],
+        )
+        if value is not None:
+            _assign_player_field(player_suffix, "Name", value)
+
+    elif command.startswith("GetPointsPlayer") and player_suffix:
+        value = _extract_from_player(
+            player_suffix,
+            [f"PointsPlayer{{player}}", "Points", "points", "Value", "value"],
+        )
+        if value is not None:
+            _assign_player_field(player_suffix, "Points", value)
+
+    elif command.startswith("GetCurrentSetPlayer") and player_suffix:
+        value = _extract_from_player(
+            player_suffix,
+            [
+                f"CurrentSetPlayer{{player}}",
+                "CurrentSet",
+                "current_set",
+                "Value",
+                "value",
+            ],
+        )
+        if value is not None:
+            _assign_player_field(player_suffix, "CurrentSet", value)
+
+    elif command.startswith("GetTieBreakPlayer") and player_suffix:
+        value = _extract_from_player(
+            player_suffix,
+            [
+                f"TieBreakPlayer{{player}}",
+                "TieBreak",
+                "tiebreak",
+                "Value",
+                "value",
+            ],
+        )
+        if value is not None:
+            _assign_player_field(player_suffix, "TieBreak", value)
+
+    elif command == "GetServe":
+        server_indicator: Optional[str] = None
+        for key in ("Server", "Serve", "CurrentServer", "value", "Value"):
+            candidate = flattened.get(key)
+            if isinstance(candidate, str):
+                normalized = candidate.strip().upper()
+                if normalized in {"A", "B"}:
+                    server_indicator = normalized
+                    break
+
+        if server_indicator is not None:
+            mapped[f"ServePlayer{server_indicator}"] = True
+            _ensure_player_entry(server_indicator)["Serve"] = True
+            other = "B" if server_indicator == "A" else "A"
+            mapped[f"ServePlayer{other}"] = False
+            _ensure_player_entry(other)["Serve"] = False
+        else:
+            for suffix in ("A", "B"):
+                candidate = _extract_from_player(
+                    suffix,
+                    [f"ServePlayer{{player}}", f"Player{{player}}", suffix],
+                    fallback_keys=[f"Serve{suffix}"],
+                )
+                if candidate is None:
+                    continue
+                interpreted = _interpret_visibility_value(candidate)
+                if interpreted is None:
+                    if isinstance(candidate, (int, float)):
+                        interpreted = candidate != 0
+                    elif isinstance(candidate, str):
+                        interpreted = candidate.strip().lower() in {"true", "tak", "on", "1"}
+                if interpreted is None:
+                    continue
+                mapped[f"ServePlayer{suffix}"] = interpreted
+                _ensure_player_entry(suffix)["Serve"] = interpreted
+
+    elif command == "GetOverlayVisibility":
+        interpreted: Optional[bool] = None
+        for key in flattened.keys():
+            interpreted = _interpret_visibility_value(flattened[key])
+            if interpreted is not None:
+                break
+        if interpreted is not None:
+            mapped["OverlayVisibility"] = interpreted
+
+    elif command == "GetTieBreakVisibility":
+        interpreted: Optional[bool] = None
+        for key in flattened.keys():
+            interpreted = _interpret_visibility_value(flattened[key])
+            if interpreted is not None:
+                break
+        if interpreted is not None:
+            mapped["TieBreakVisibility"] = interpreted
+
+    elif command == "GetMode":
+        value = None
+        for key in ("Mode", "mode", "Value", "value"):
+            if key in flattened:
+                value = flattened[key]
+                break
+        if value is not None:
+            mapped["Mode"] = value
+
+    elif command == "GetSet":
+        for key, value in list(flattened.items()):
+            match = _PLAYER_FIELD_PATTERN.match(str(key))
+            if not match:
+                continue
+            field, suffix = match.groups()
+            _assign_player_field(suffix, field, value)
+
+    # spójność: jeśli łapiemy punkty TB, dobrze mieć też flagę widoczności TB (gdy już była)
+    if player_suffix and command.startswith("GetTieBreakPlayer"):
+        mapped.setdefault("TieBreakVisibility", mapped.get("TieBreakVisibility"))
+
+    return mapped
+
+
+def _classify_phase(
+    snapshot: Dict[str, Any], state: CourtState, score: ScoreSnapshot
+) -> CourtPhase:
+    name_signature = state.compute_name_signature(snapshot)
+    has_any_name = any(part.strip() for part in name_signature.split("|"))
+
+    status = snapshot.get("status")
+
+    if status == SNAPSHOT_STATUS_UNAVAILABLE:
+        return CourtPhase.IDLE_NAMES
+
+    if not has_any_name:
+        return CourtPhase.IDLE_NAMES
+
+    if (
+        state.phase is CourtPhase.IDLE_NAMES
+        and NAME_STABILIZATION_TICKS > 0
+        and state.name_stability < NAME_STABILIZATION_TICKS
+    ):
+        return CourtPhase.IDLE_NAMES
+
+    if (
+        state.name_stability < NAME_STABILIZATION_TICKS
+        and not score.points_any
+        and not score.games_any
+        and not score.sets_present
+    ):
+        return CourtPhase.IDLE_NAMES
+
+    sets_won_a, sets_won_b = score.sets_won
+    finished_sets = score.sets_completed >= 1 and (
+        max(sets_won_a, sets_won_b) >= 2 or score.sets_completed >= 3
+    )
+    if finished_sets and state.points_absent_streak >= 2:
+        return CourtPhase.FINISHED
+
+    if score.super_tb_active:
+        return CourtPhase.SUPER_TB10
+
+    if score.tie_break_active:
+        return CourtPhase.TIEBREAK7
+
+    if score.sets_present and score.sets_completed > 0:
+        return CourtPhase.LIVE_SETS
+
+    if score.games_positive:
+        return CourtPhase.LIVE_GAMES
+
+    if state.points_positive_streak >= 2:
+        return CourtPhase.LIVE_POINTS
+
+    if score.points_any or score.games_any or score.sets_present:
+        return CourtPhase.PRE_START
+
+    return CourtPhase.PRE_START
+
+
+def _process_snapshot(state: CourtState, snapshot: Dict[str, Any], now: float) -> None:
+    state.mark_polled(now)
+    name_signature = state.compute_name_signature(snapshot)
+    state.update_name_stability(
+        name_signature, required_ticks=NAME_STABILIZATION_TICKS
+    )
+    score_snapshot = state.compute_score_snapshot(snapshot)
+    state.update_score_stability(score_snapshot)
+    desired_phase = _classify_phase(snapshot, state, score_snapshot)
+    raw_signature = state.compute_raw_signature(snapshot)
+
+    if (
+        state.phase is CourtPhase.FINISHED
+        and desired_phase is CourtPhase.FINISHED
+        and state.finished_name_signature
+        and name_signature != state.finished_name_signature
+    ):
+        state.transition(CourtPhase.IDLE_NAMES, now)
+        return
+
+    if (
+        state.phase is CourtPhase.FINISHED
+        and desired_phase is CourtPhase.FINISHED
+        and state.finished_raw_signature
+        and raw_signature != state.finished_raw_signature
+    ):
+        state.transition(CourtPhase.IDLE_NAMES, now)
+        return
+
+    previous_phase = state.phase
+    state.transition(desired_phase, now)
+
+    if state.phase is CourtPhase.FINISHED:
+        if previous_phase is not CourtPhase.FINISHED:
+            _archive_snapshot(state.kort_id, snapshot)
+        state.finished_name_signature = name_signature
+        state.finished_raw_signature = raw_signature
+    else:
+        state.finished_name_signature = None
+        state.finished_raw_signature = None
+
+    # Harmonogram komend aktualizowany jest w CourtState podczas przejść
+
+    availability_value = snapshot.get("available")
+    raw_payload = snapshot.get("raw")
+    has_visibility_flag = False
+    if isinstance(raw_payload, dict):
+        for key in raw_payload.keys():
+            key_text = str(key).lower()
+            if "overlayvisibility" in key_text or key_text == "overlayvisible":
+                has_visibility_flag = True
+                break
+
+    if availability_value is False:
+        if has_visibility_flag:
+            state.set_stage(CourtPollingStage.OFF, now)
+            state.apply_availability_pause(now, UNAVAILABLE_SLOW_POLL_SECONDS)
+    elif availability_value is True:
+        state.set_stage(CourtPollingStage.NORMAL, now)
+        state.clear_availability_pause()
+
+
+def update_snapshot_for_kort(
+    kort_id: str,
+    control_url: str,
+    *,
+    session: Optional[requests.sessions.Session] = None,
+) -> Dict[str, Any]:
+    entry = ensure_snapshot_entry(kort_id)
+    with snapshots_lock:
+        snapshot = copy.deepcopy(entry)
+    return snapshot
+
+
+def _mark_unavailable(kort_id: str, *, error: Optional[str]) -> Dict[str, Any]:
+    payload = {
+        "kort_id": str(kort_id),
+        "status": SNAPSHOT_STATUS_UNAVAILABLE,
+        "last_updated": _now_iso(),
+        "players": {},
+        "raw": {},
+        "serving": None,
+        "error": error,
+        "available": False,
+        "pause_minutes": COMMAND_ERROR_PAUSE_MINUTES,
+        "pause_active": False,
+        "pause_until": None,
+    }
+    entry = ensure_snapshot_entry(kort_id)
+    with snapshots_lock:
+        archive = entry.get("archive", [])
+        entry.update(payload)
+        entry["archive"] = archive
+        payload = copy.deepcopy(entry)
+    return payload
+
+
+_thread: Optional[threading.Thread] = None
+
+
+def start_background_updater(
+    app,
+    overlay_links_supplier: Callable[[], Dict[str, Dict[str, str]]],
+    *,
+    session: Optional[requests.sessions.Session] = None,
+) -> None:
+    global _thread
+
+    if app.config.get("TESTING") or os.environ.get("PYTEST_CURRENT_TEST"):
+        logger.debug("Pomijam uruchomienie wątku aktualizacji w trybie testowym")
+        return
+
+    if _thread and _thread.is_alive():
+        return
+
+    def runner() -> None:
+        while True:
+            tick_start = time.time()
+            _update_once(app, overlay_links_supplier, session=session, now=tick_start)
+            elapsed = time.time() - tick_start
+            sleep_time = max(0.0, UPDATE_INTERVAL_SECONDS - elapsed)
+            time.sleep(sleep_time)
+
+    # Ustawiamy wstępnie stan kortów na "brak danych"
+    try:
+        with app.app_context():
+            links = overlay_links_supplier() or {}
+        for kort_id in links:
+            ensure_snapshot_entry(kort_id)
+            _ensure_court_state(kort_id)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "Nie udało się wstępnie zainicjować snapshotów kortów: %s", exc
+        )
+
+    _thread = threading.Thread(target=runner, name="kort-snapshots", daemon=True)
+    _thread.start()
 
 
 def _update_once(
@@ -1960,43 +2197,6 @@ def _update_once(
         _record_tick()
 
 
-_thread: Optional[threading.Thread] = None
-
-
-def start_background_updater(
-    app,
-    overlay_links_supplier: Callable[[], Dict[str, Dict[str, str]]],
-    *,
-    session: Optional[requests.sessions.Session] = None,
-) -> None:
-    global _thread
-    if _thread and _thread.is_alive():
-        return
-
-    def runner() -> None:
-        while True:
-            tick_start = time.time()
-            _update_once(app, overlay_links_supplier, session=session, now=tick_start)
-            elapsed = time.time() - tick_start
-            sleep_time = max(0.0, UPDATE_INTERVAL_SECONDS - elapsed)
-            time.sleep(sleep_time)
-
-    # Ustawiamy wstępnie stan kortów na "brak danych"
-    try:
-        with app.app_context():
-            links = overlay_links_supplier() or {}
-        for kort_id in links:
-            ensure_snapshot_entry(kort_id)
-            _ensure_court_state(kort_id)
-    except Exception as exc:  # noqa: BLE001
-        logger.warning(
-            "Nie udało się wstępnie zainicjować snapshotów kortów: %s", exc
-        )
-
-    _thread = threading.Thread(target=runner, name="kort-snapshots", daemon=True)
-    _thread.start()
-
-
 __all__ = [
     "COMMAND_PLAN",
     "SNAPSHOT_STATUS_NO_DATA",
@@ -2012,4 +2212,3 @@ __all__ = [
     "start_background_updater",
     "update_snapshot_for_kort",
 ]
-
