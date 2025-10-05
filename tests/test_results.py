@@ -462,6 +462,31 @@ def test_complete_names_trigger_pre_start_within_three_ticks():
     assert schedule.next_due is not None
 
 
+def test_scores_allow_phase_progress_before_name_stabilization():
+    kort_id = "score-before-stable"
+    state = results_module._ensure_court_state(kort_id)
+    state.phase_offset = 0.0
+    state._configure_phase_commands(now=0.0)
+
+    payload = results_module._flatten_overlay_payload(
+        {
+            "NamePlayerA": "A. Kowalski",
+            "NamePlayerB": "B. Zielińska",
+            "PointsPlayerA": 15,
+            "PointsPlayerB": 0,
+        }
+    )
+    snapshot = results_module._merge_partial_payload(kort_id, payload)
+
+    now = 0.0
+    results_module._process_snapshot(state, snapshot, now)
+
+    if results_module.NAME_STABILIZATION_TICKS > 1:
+        assert state.name_stability < results_module.NAME_STABILIZATION_TICKS
+
+    assert state.phase is CourtPhase.PRE_START
+
+
 def test_name_stabilization_triggers_points_schedule_and_snapshot_completion():
     kort_id = "phase-schedule"
     state = results_module._ensure_court_state(kort_id)
