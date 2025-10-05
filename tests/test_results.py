@@ -335,12 +335,25 @@ def test_merge_partial_payload_sets_available_flag(payload, expected):
     assert snapshot["available"] is expected
 
 
-def test_merge_partial_payload_defaults_available_to_false():
+def test_merge_partial_payload_defaults_available_to_none():
     kort_id = "no-visibility"
 
     snapshot = results_module._merge_partial_payload(kort_id, {})
 
-    assert snapshot["available"] is False
+    assert snapshot["available"] is None
+
+
+def test_merge_partial_payload_missing_visibility_keeps_none():
+    kort_id = "no-visibility-unchanged"
+
+    initial_snapshot = results_module._merge_partial_payload(kort_id, {})
+    assert initial_snapshot["available"] is None
+
+    partial = results_module._flatten_overlay_payload({"NamePlayerA": "A. Kowalski"})
+
+    snapshot = results_module._merge_partial_payload(kort_id, partial)
+
+    assert snapshot["available"] is None
 
 
 def test_merge_partial_payload_single_player_payload_sets_partial_status():
