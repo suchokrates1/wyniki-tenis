@@ -1101,7 +1101,8 @@ def _merge_partial_payload(kort_id: str, partial: Dict[str, Any]) -> Dict[str, A
                 elif candidate not in (None, ""):
                     name_value = candidate
                     break
-            if not isinstance(name_value, str) or not name_value.strip():
+            has_name = isinstance(name_value, str) and bool(name_value.strip())
+            if not has_name:
                 return False
 
             points_value: Optional[Any] = None
@@ -1131,7 +1132,7 @@ def _merge_partial_payload(kort_id: str, partial: Dict[str, Any]) -> Dict[str, A
                         set_values.append(value)
             has_sets = any(_has_content(value) for value in set_values)
 
-            return has_points or has_sets
+            return has_name or has_points or has_sets
 
         entry["status"] = SNAPSHOT_STATUS_NO_DATA
 
